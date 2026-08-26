@@ -5,6 +5,7 @@ import circuitDiagram from "./assets/circuit-diagram.svg";
 // internal coordinates stay fixed so every drawn element scales together.
 const WIDTH = 1600;
 const HEIGHT = 920;
+const CANVAS_RENDER_SCALE = 2;
 
 // The particle apparatus is rendered as one uniformly-scaled object. Physics
 // coordinates and the relative dimensions of reservoir / filament / sink / ions
@@ -18,8 +19,8 @@ const PARTICLE_VIEW_OFFSET_Y = 76; // fitted and centred in the left simulation 
 const ANALYSIS_X = 920;
 const ANALYSIS_WIDTH = 650; // shared width for I-V, current history, and instrument panel
 const IV_PANEL_WIDTH = ANALYSIS_WIDTH; // all analysis panels now share the same width
-const IV_PANEL_Y = 42;
-const IV_PANEL_HEIGHT = 478;
+const IV_PANEL_Y = 29;
+const IV_PANEL_HEIGHT = 491;
 const IV_PANEL_COLLAPSED_HEIGHT = 42;
 const HISTORY_PANEL_Y = 502;
 const HISTORY_PANEL_HEIGHT = 170;
@@ -54,8 +55,10 @@ const REPULSION_SOFTENING = 11;
 const OVERLAP_PUSH = 55;
 
 // Electron-ion collision / heating model.
-const ION_RADIUS = 10.5; // rendered ion radius
+const ION_RADIUS = 10.5; // nominal radius; drawing applies a separate visual scale
 const MAX_ION_COLLISION_RADIUS = 30.0; // larger maximum invisible effective radius
+const ION_COLLISION_GROWTH_START_CURRENT = 2.5;
+const ION_COLLISION_FULL_SCALE_CURRENT = 5.0;
 const COLLISION_RESTITUTION = 0.91;
 const COLLISION_SCATTER = 0.42;
 // Hotter lattice vibrations randomise electron direction more strongly.
@@ -84,7 +87,7 @@ const RESERVOIR = {
   // Narrower and taller than the earlier baseline while keeping the
   // filament-side edge fixed and the chamber vertically centred.
   x: 29,
-  y: 164,
+  y: 144,
   width: 265,
   height: 887,
 };
@@ -94,7 +97,7 @@ const FILAMENT = {
   // Four ion columns spaced even farther apart horizontally.
   // Extending the filament width by about one third gives a 272 px usable span
   // between the 30 px edge margins, so the 4 columns sit about 90.7 px apart.
-  y: 254,
+  y: 234,
   width: 332,
   height: 708,
 };
@@ -129,6 +132,12 @@ const SINK_NECK = {
 const LEFT_EXIT_X = RESERVOIR.x + 5;
 const RIGHT_EXIT_X = SINK.x + SINK.width - 5;
 const AMMETER_X = Math.round(FILAMENT.x + FILAMENT.width * 0.74);
+const SIMULATION_LABEL_FONT_SIZE = Math.round(17 * 1.1);
+const SIMULATION_DETAIL_FONT_SIZE = Math.round(11 * 1.1);
+const SIMULATION_DIRECTION_FONT_SIZE = Math.round(12 * 1.1);
+const ION_TEMPERATURE_LABEL_FONT_SIZE = Math.round(
+  SIMULATION_DETAIL_FONT_SIZE * 1.5
+);
 
 class Electron {
   constructor(x, y) {
@@ -244,12 +253,15 @@ function insideAllowedRegion(x, y) {
     WALL_BUFFER
   );
 
-  // The terminal rectangles visually overlap the filament. Restrict their
-  // collision geometry so that, away from the neck opening, their usable
-  // interior stops a full electron-wall buffer before the filament edge.
+  // Keep the closed wall where each terminal overlaps the filament vertically,
+  // but allow electrons to occupy the full terminal corners above and below it.
+  const outsideFilamentVerticalSpan =
+    y < FILAMENT.y - WALL_BUFFER ||
+    y > FILAMENT.y + FILAMENT.height + WALL_BUFFER;
   const inLeftTerminal =
     pointInRect(x, y, RESERVOIR, WALL_BUFFER) &&
     (
+      outsideFilamentVerticalSpan ||
       x <= FILAMENT.x - WALL_BUFFER ||
       neckGateContainsY(SOURCE_NECK, y)
     );
@@ -258,6 +270,7 @@ function insideAllowedRegion(x, y) {
   const inRightTerminal =
     pointInRect(x, y, SINK, WALL_BUFFER) &&
     (
+      outsideFilamentVerticalSpan ||
       x >= filamentRight + WALL_BUFFER ||
       neckGateContainsY(SINK_NECK, y)
     );
@@ -357,25 +370,20 @@ function makeIonLattice() {
 }
 
 function drawTerminalPositiveIonLattice(ctx, chamber) {
-  // Match the filament lattice geometry exactly: same visual ion radius,
-  // vertical spacing, horizontal spacing, and alternate-column stagger.
-  const visualRadius = ION_RADIUS * 1.76;
+  // Keep the terminal ions slightly smaller and closer together than the
+  // filament lattice so four decorative columns fit comfortably.
+  const visualRadius = ION_RADIUS * 1.65;
   const edgeInset = 14;
   const filamentRowCount = 12;
   const rowSpacing =
     (FILAMENT.height - edgeInset * 2) / (filamentRowCount - 0.5);
 
-  const filamentStartX = FILAMENT.x + 30;
-  const filamentEndX = FILAMENT.x + FILAMENT.width - 30;
-  const filamentColumnCount = 4;
-  const columnSpacing =
-    (filamentEndX - filamentStartX) /
-    Math.max(1, filamentColumnCount - 1);
-
   const left = chamber.x + 30;
   const right = chamber.x + chamber.width - 30;
   const top = chamber.y + edgeInset;
   const bottom = chamber.y + chamber.height - edgeInset;
+  const columnCount = 4;
+  const columnSpacing = (right - left) / (columnCount - 1);
 
   ctx.save();
 
@@ -390,12 +398,8 @@ function drawTerminalPositiveIonLattice(ctx, chamber) {
   );
   ctx.clip();
 
-  let column = 0;
-  for (
-    let x = left;
-    x <= right + 0.001;
-    x += columnSpacing, column += 1
-  ) {
+  for (let column = 0; column < columnCount; column += 1) {
+    const x = left + column * columnSpacing;
     const staggerY = column % 2 === 1 ? rowSpacing * 0.5 : 0;
 
     for (
@@ -403,8 +407,7 @@ function drawTerminalPositiveIonLattice(ctx, chamber) {
       y <= bottom + 0.001;
       y += rowSpacing
     ) {
-      // A soft, static cool-ion treatment keeps these in the background while
-      // preserving the same apparent size as the filament ions.
+      // A soft, static cool-ion treatment keeps these in the background.
       const g = ctx.createRadialGradient(
         x - visualRadius * 0.32,
         y - visualRadius * 0.32,
@@ -464,19 +467,9 @@ function positionIsClear(x, y, electrons, minimumSpacing = 11) {
 
 function spawnOneElectron(electrons, potentialDifference) {
   const sourceRect = sourceRectFor(potentialDifference);
-  const direction = flowDirection(potentialDifference);
 
-  // Spawn only in the true terminal body, never in the terminal/filament
-  // overlap. This prevents replenishment from appearing on the wrong side of
-  // the closed corner wall.
-  const left =
-    direction > 0
-      ? sourceRect.x + WALL_BUFFER + 5
-      : FILAMENT.x + FILAMENT.width + WALL_BUFFER + 5;
-  const right =
-    direction > 0
-      ? FILAMENT.x - WALL_BUFFER - 5
-      : sourceRect.x + sourceRect.width - WALL_BUFFER - 5;
+  const left = sourceRect.x + WALL_BUFFER + 5;
+  const right = sourceRect.x + sourceRect.width - WALL_BUFFER - 5;
   const top = sourceRect.y + WALL_BUFFER + 5;
   const bottom = sourceRect.y + sourceRect.height - WALL_BUFFER - 5;
 
@@ -484,6 +477,7 @@ function spawnOneElectron(electrons, potentialDifference) {
     const x = left + Math.random() * Math.max(1, right - left);
     const y = top + Math.random() * Math.max(1, bottom - top);
 
+    if (!insideAllowedRegion(x, y)) continue;
     if (!positionIsClear(x, y, electrons)) continue;
 
     electrons.push(new Electron(x, y));
@@ -495,7 +489,6 @@ function spawnOneElectron(electrons, potentialDifference) {
 
 function rebuildReservoirPopulation(electrons, targetCount, potentialDifference) {
   const sourceRect = sourceRectFor(potentialDifference);
-  const direction = flowDirection(potentialDifference);
 
   // Keep conductor electrons and anything outside the current source chamber,
   // but replace the complete source-reservoir population on every slider change.
@@ -507,14 +500,8 @@ function rebuildReservoirPopulation(electrons, targetCount, potentialDifference)
   const spacing = 11.4;
   const top = sourceRect.y + WALL_BUFFER + 7;
   const bottom = sourceRect.y + sourceRect.height - WALL_BUFFER - 7;
-  const left =
-    direction > 0
-      ? sourceRect.x + WALL_BUFFER + 7
-      : FILAMENT.x + FILAMENT.width + WALL_BUFFER + 5;
-  const right =
-    direction > 0
-      ? FILAMENT.x - WALL_BUFFER - 5
-      : sourceRect.x + sourceRect.width - WALL_BUFFER - 7;
+  const left = sourceRect.x + WALL_BUFFER + 7;
+  const right = sourceRect.x + sourceRect.width - WALL_BUFFER - 7;
 
   for (let y = top; y <= bottom; y += spacing) {
     for (let x = left; x <= right; x += spacing) {
@@ -538,6 +525,7 @@ function rebuildReservoirPopulation(electrons, targetCount, potentialDifference)
 
   for (const point of candidates) {
     if (added >= desired) break;
+    if (!insideAllowedRegion(point.x, point.y)) continue;
     if (!positionIsClear(point.x, point.y, retained, 9.4)) continue;
     retained.push(new Electron(point.x, point.y));
     added += 1;
@@ -548,6 +536,7 @@ function rebuildReservoirPopulation(electrons, targetCount, potentialDifference)
     attempts += 1;
     const x = left + Math.random() * Math.max(1, right - left);
     const y = top + Math.random() * Math.max(1, bottom - top);
+    if (!insideAllowedRegion(x, y)) continue;
     if (!positionIsClear(x, y, retained, 9.2)) continue;
     retained.push(new Electron(x, y));
     added += 1;
@@ -930,11 +919,24 @@ function moveElectron(electron, dt, potentialDifference) {
 
 function ionCollisionRadiusAtCurrent(current) {
   const currentMagnitude = Math.abs(current);
-  const currentFraction = Math.max(0, Math.min(1, currentMagnitude / 5.0));
+  if (currentMagnitude <= ION_COLLISION_GROWTH_START_CURRENT) {
+    return ION_RADIUS;
+  }
 
-  // Keep the collision envelope almost unchanged at low and moderate current,
-  // then make it grow rapidly as |I| approaches 5 A.
-  const shapedCurrent = Math.pow(currentFraction, 4.5);
+  const currentFraction = Math.max(
+    0,
+    Math.min(
+      1,
+      (currentMagnitude - ION_COLLISION_GROWTH_START_CURRENT) /
+        (ION_COLLISION_FULL_SCALE_CURRENT -
+          ION_COLLISION_GROWTH_START_CURRENT)
+    )
+  );
+
+  // Hold the collision envelope at its minimum through 2.5 A, then increase it
+  // smoothly toward the existing 30 px maximum at 5 A. A quadratic rise joins
+  // the fixed section without an abrupt size jump.
+  const shapedCurrent = currentFraction * currentFraction;
 
   return (
     ION_RADIUS +
@@ -1179,6 +1181,9 @@ function formatAxisValue(value, unit) {
     if (value >= 1000) return `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}k`;
     return value.toFixed(value >= 100 ? 0 : 1);
   }
+  if (unit === "A") {
+    return value.toFixed(Number.isInteger(value) ? 0 : 1);
+  }
   return value.toFixed(value >= 1 ? 1 : 2);
 }
 
@@ -1290,7 +1295,7 @@ function drawTimeSeriesPanel(
   }
 
   ctx.fillStyle = "#956363";
-  ctx.font = "8px system-ui, sans-serif";
+  ctx.font = "12px system-ui, sans-serif";
   ctx.textAlign = "right";
   ctx.fillText(
     `${formatAxisValue(maxValue, unit)}${unit}`,
@@ -1431,7 +1436,28 @@ function drawAmmeterFront(ctx, current, history, voltageEvents, now, drawHistory
 }
 
 
-function drawIVGraph(ctx, points, minimised = false) {
+function filamentTrendCurrent(voltage) {
+  const straightLimit = 5.5;
+  const lowVoltageGradient = 0.429;
+  const magnitude = Math.abs(voltage);
+
+  if (magnitude <= straightLimit) {
+    return voltage * lowVoltageGradient;
+  }
+
+  // Match the straight section's gradient at 5.5 V, then reduce the gradient
+  // smoothly to model the rising resistance of a heating filament.
+  // These values put the guide at 3.9 A at 12 V while preserving a smooth
+  // join to the straight section.
+  const bendScale = 4.88;
+  const extraVoltage = magnitude - straightLimit;
+  const currentMagnitude =
+    straightLimit * lowVoltageGradient +
+    lowVoltageGradient * bendScale * (1 - Math.exp(-extraVoltage / bendScale));
+  return Math.sign(voltage) * currentMagnitude;
+}
+
+function drawIVGraph(ctx, points, minimised = false, showTrendOverlay = false) {
   // The I-V graph anchors the same right-hand analysis column as the current-history
   // panel and instrument cluster. All offsets below are local to this one panel.
   const x = ANALYSIS_X;
@@ -1458,10 +1484,10 @@ function drawIVGraph(ctx, points, minimised = false) {
   ctx.font = "700 12px system-ui, sans-serif";
   ctx.fillText("I–V CHARACTERISTIC", x + 12, y + 16);
 
-  ctx.textAlign = "right";
+  ctx.textAlign = "center";
   ctx.font = "600 10px system-ui, sans-serif";
   ctx.fillStyle = "#65727c";
-  ctx.fillText(`${points.length} captured`, x + width - 56, y + 16);
+  ctx.fillText(`${points.length} captured`, x + 240, y + 16);
 
   if (minimised) {
     return;
@@ -1566,36 +1592,63 @@ function drawIVGraph(ctx, points, minimised = false) {
   ctx.fillText("difference", xAxisLabelRight, zeroY);
   ctx.fillText("(V)", xAxisLabelRight, zeroY + 14);
 
+  if (showTrendOverlay) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(plotLeft, plotTop, plotWidth, plotHeight);
+    ctx.clip();
+
+    ctx.beginPath();
+    for (let step = 0; step <= 240; step += 1) {
+      const trendVoltage = -MAX_VOLTAGE + (step / 240) * MAX_VOLTAGE * 2;
+      const px = voltageToX(trendVoltage);
+      const py = currentToY(filamentTrendCurrent(trendVoltage));
+      if (step === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.strokeStyle = "rgba(91, 62, 151, 0.92)";
+    ctx.lineWidth = 3;
+    ctx.setLineDash([9, 6]);
+    ctx.stroke();
+    ctx.restore();
+
+    ctx.fillStyle = "#5b3e97";
+    ctx.font = "700 11px system-ui, sans-serif";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.fillText("Filament bulb trend", plotLeft + 10, plotTop + 9);
+  }
+
   if (points.length === 0) {
     ctx.fillStyle = "rgba(82, 96, 109, 0.72)";
     ctx.font = "24px system-ui, sans-serif";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillText(
-      "No captured data points",
-      plotLeft + plotWidth / 2,
+      "No captured  data points",
+      plotLeft + plotWidth / 2 - 6,
       plotTop + plotHeight / 2 - 10
     );
     ctx.font = "20px system-ui, sans-serif";
     ctx.fillText(
-      "Set the p.d., let current settle, then capture",
-      plotLeft + plotWidth / 2,
+      "Set the p.d., let current  settle, then capture",
+      plotLeft + plotWidth / 2 - 18,
       plotTop + plotHeight / 2 + 10
     );
     return;
   }
 
   ctx.save();
-  const markerRadius = 5;
+  const markerHalfSize = 7;
   ctx.beginPath();
-  // Let markers extend beyond the plot boundary by their radius. This keeps
+  // Let markers extend beyond the plot boundary by half their size. This keeps
   // endpoint data (for example ±12 V) at its exact axis coordinate while
   // still showing the complete marker.
   ctx.rect(
-    plotLeft - markerRadius - 1,
-    plotTop - markerRadius - 1,
-    plotWidth + (markerRadius + 1) * 2,
-    plotHeight + (markerRadius + 1) * 2
+    plotLeft - markerHalfSize - 2,
+    plotTop - markerHalfSize - 2,
+    plotWidth + (markerHalfSize + 2) * 2,
+    plotHeight + (markerHalfSize + 2) * 2
   );
   ctx.clip();
 
@@ -1606,17 +1659,54 @@ function drawIVGraph(ctx, points, minimised = false) {
     const py = currentToY(point.current);
 
     ctx.beginPath();
-    ctx.arc(px, py, 5, 0, Math.PI * 2);
-    ctx.fillStyle = "#a7195b";
-    ctx.fill();
-    ctx.strokeStyle = "#ffffff";
-    ctx.lineWidth = 1.6;
+    ctx.moveTo(px - markerHalfSize, py - markerHalfSize);
+    ctx.lineTo(px + markerHalfSize, py + markerHalfSize);
+    ctx.moveTo(px + markerHalfSize, py - markerHalfSize);
+    ctx.lineTo(px - markerHalfSize, py + markerHalfSize);
+    ctx.lineCap = "round";
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.96)";
+    ctx.lineWidth = 5;
+    ctx.stroke();
+    ctx.strokeStyle = "#a7195b";
+    ctx.lineWidth = 2.8;
     ctx.stroke();
   }
   ctx.restore();
 }
 
-function drawScene(ctx, electrons, ions, tempC, voltage, current, resistance, targetCount, measurementHistory, voltageEvents, ivPoints, now, ivGraphMinimised, currentHistoryMinimised, hideTerminalElectrons) {
+function drawApparatusLabel(ctx, text, component, gap, xOffset = 0) {
+  ctx.save();
+  ctx.fillStyle = "#26313a";
+  ctx.font = `700 ${SIMULATION_LABEL_FONT_SIZE}px system-ui, sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "bottom";
+  ctx.fillText(
+    text,
+    component.x + component.width / 2 + xOffset,
+    component.y - gap
+  );
+  ctx.restore();
+}
+
+function drawSimulationLabel(ctx, text, x, y) {
+  ctx.save();
+  ctx.fillStyle = "#26313a";
+  ctx.font = `700 ${SIMULATION_LABEL_FONT_SIZE}px system-ui, sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "bottom";
+  const lines = Array.isArray(text) ? text : [text];
+  const lineHeight = SIMULATION_LABEL_FONT_SIZE + 2;
+  for (let index = 0; index < lines.length; index += 1) {
+    ctx.fillText(
+      lines[index],
+      x,
+      y - (lines.length - 1 - index) * lineHeight
+    );
+  }
+  ctx.restore();
+}
+
+function drawScene(ctx, electrons, ions, tempC, voltage, current, resistance, targetCount, measurementHistory, voltageEvents, ivPoints, now, ivGraphMinimised, currentHistoryMinimised, hideTerminalElectrons, showTrendOverlay) {
   ctx.clearRect(0, 0, WIDTH, HEIGHT);
 
   const gradient = ctx.createLinearGradient(0, 0, 0, HEIGHT);
@@ -1635,10 +1725,13 @@ function drawScene(ctx, electrons, ions, tempC, voltage, current, resistance, ta
   ctx.translate(PARTICLE_VIEW_OFFSET_X, PARTICLE_VIEW_OFFSET_Y);
   ctx.scale(PARTICLE_VIEW_SCALE, PARTICLE_VIEW_SCALE);
 
-  ctx.fillStyle = "#26313a";
-  ctx.font = "700 17px system-ui, sans-serif";
-  ctx.textAlign = "left";
-  ctx.fillText("Metal filament", FILAMENT.x + 78, FILAMENT.y - 22);
+  drawApparatusLabel(ctx, "Metal filament", FILAMENT, 14, -30);
+  drawSimulationLabel(
+    ctx,
+    ["Electron flow", "detector"],
+    AMMETER_X,
+    FILAMENT.y - 40
+  );
 
   drawAmmeterBack(ctx);
 
@@ -1660,13 +1753,11 @@ function drawScene(ctx, electrons, ions, tempC, voltage, current, resistance, ta
 
     drawTerminalPositiveIonLattice(ctx, chamber);
 
-    ctx.fillStyle = "#26313a";
-    ctx.font = "700 17px system-ui, sans-serif";
-    ctx.textAlign = "left";
-    ctx.fillText(
+    drawApparatusLabel(
+      ctx,
       isSource ? "Negative terminal" : "Positive terminal",
-      chamber.x + 10,
-      chamber.y - 12
+      chamber,
+      10
     );
   }
 
@@ -1769,12 +1860,15 @@ function drawScene(ctx, electrons, ions, tempC, voltage, current, resistance, ta
   ctx.lineWidth = 1;
   ctx.stroke();
   ctx.fillStyle = "#52606d";
-  ctx.font = "11px system-ui, sans-serif";
+  ctx.font = `${SIMULATION_DETAIL_FONT_SIZE}px system-ui, sans-serif`;
+  ctx.textBaseline = "alphabetic";
   ctx.textAlign = "left";
   ctx.fillText("20 °C", legendX, legendY + 23);
   ctx.textAlign = "center";
-  ctx.fillText("Ion temperature", legendX + legendW / 2, legendY - 6);
+  ctx.font = `${ION_TEMPERATURE_LABEL_FONT_SIZE}px system-ui, sans-serif`;
+  ctx.fillText("Ion temperature", legendX + legendW / 2 - 10, legendY - 16);
   ctx.textAlign = "right";
+  ctx.font = `${SIMULATION_DETAIL_FONT_SIZE}px system-ui, sans-serif`;
   ctx.fillText("2000 °C+", legendX + legendW, legendY + 23);
 
   for (const electron of electrons) {
@@ -1843,7 +1937,8 @@ function drawScene(ctx, electrons, ions, tempC, voltage, current, resistance, ta
 
   ctx.fillStyle = "#5b6770";
   ctx.textAlign = "center";
-  ctx.font = "12px system-ui, sans-serif";
+  ctx.font = `${SIMULATION_DIRECTION_FONT_SIZE}px system-ui, sans-serif`;
+  ctx.textBaseline = "alphabetic";
   ctx.fillText(
     direction > 0 ? "electrons leave →" : "← electrons leave",
     sinkRect.x + sinkRect.width / 2,
@@ -1862,7 +1957,7 @@ function drawScene(ctx, electrons, ions, tempC, voltage, current, resistance, ta
     historyPanelTop(ivGraphMinimised),
     currentHistoryMinimised
   );
-  drawIVGraph(ctx, ivPoints, ivGraphMinimised);
+  drawIVGraph(ctx, ivPoints, ivGraphMinimised, showTrendOverlay);
 }
 export default function App() {
   const canvasRef = useRef(null);
@@ -1884,14 +1979,17 @@ export default function App() {
   const [paused, setPaused] = useState(false);
   const [showCircuitDiagram, setShowCircuitDiagram] = useState(false);
   const [showDensityExplanation, setShowDensityExplanation] = useState(false);
+  const [showIVGraphExplanation, setShowIVGraphExplanation] = useState(false);
   const [hideTerminalElectrons, setHideTerminalElectrons] = useState(false);
   const [ivGraphMinimised, setIvGraphMinimised] = useState(false);
+  const [showTrendOverlay, setShowTrendOverlay] = useState(false);
   const [analogueMeterMinimised, setAnalogueMeterMinimised] = useState(false);
   const [digitalCurrentMinimised, setDigitalCurrentMinimised] = useState(false);
   const [resistanceMinimised, setResistanceMinimised] = useState(false);
   const [currentHistoryMinimised, setCurrentHistoryMinimised] = useState(false);
   const [temperatureMinimised, setTemperatureMinimised] = useState(false);
   const ivGraphMinimisedRef = useRef(false);
+  const showTrendOverlayRef = useRef(false);
   const currentHistoryMinimisedRef = useRef(false);
   const hideTerminalElectronsRef = useRef(false);
   const [readout, setReadout] = useState({
@@ -1912,22 +2010,31 @@ export default function App() {
   }, [paused]);
 
   useEffect(() => {
-    if (!showCircuitDiagram && !showDensityExplanation) return undefined;
+    if (
+      !showCircuitDiagram &&
+      !showDensityExplanation &&
+      !showIVGraphExplanation
+    ) return undefined;
 
     const handleKeyDown = (event) => {
       if (event.key === "Escape") {
         setShowCircuitDiagram(false);
         setShowDensityExplanation(false);
+        setShowIVGraphExplanation(false);
       }
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [showCircuitDiagram, showDensityExplanation]);
+  }, [showCircuitDiagram, showDensityExplanation, showIVGraphExplanation]);
 
   useEffect(() => {
     ivGraphMinimisedRef.current = ivGraphMinimised;
   }, [ivGraphMinimised]);
+
+  useEffect(() => {
+    showTrendOverlayRef.current = showTrendOverlay;
+  }, [showTrendOverlay]);
 
   useEffect(() => {
     currentHistoryMinimisedRef.current = currentHistoryMinimised;
@@ -1942,6 +2049,14 @@ export default function App() {
     if (!canvas) return undefined;
 
     const ctx = canvas.getContext("2d");
+    ctx.setTransform(
+      CANVAS_RENDER_SCALE,
+      0,
+      0,
+      CANVAS_RENDER_SCALE,
+      0,
+      0
+    );
 
     // Start with charge already distributed through the filament. Its initial
     // density is half the reservoir density at the selected starting voltage.
@@ -1955,6 +2070,7 @@ export default function App() {
     let animationId;
     let lastTime = performance.now();
     let lastUiUpdate = 0;
+    let lastTemperatureReadoutUpdate = 0;
 
     const frame = (now) => {
       const rawDt = (now - lastTime) / 1000;
@@ -2121,19 +2237,28 @@ export default function App() {
         now,
         ivGraphMinimisedRef.current,
         currentHistoryMinimisedRef.current,
-        hideTerminalElectronsRef.current
+        hideTerminalElectronsRef.current,
+        showTrendOverlayRef.current
       );
 
       if (now - lastUiUpdate > 120) {
         lastUiUpdate = now;
-        setReadout({
+        const updateTemperatureReadout =
+          now - lastTemperatureReadoutUpdate >= 500;
+        if (updateTemperatureReadout) {
+          lastTemperatureReadoutUpdate = now;
+        }
+
+        setReadout((previousReadout) => ({
           current,
           resistance,
-          temperature: temperatureRef.current,
+          temperature: updateTemperatureReadout
+            ? temperatureRef.current
+            : previousReadout.temperature,
           collisionsPerElectronPerSecond,
           reservoirCount,
           totalElectrons: electronsRef.current.length,
-        });
+        }));
       }
 
       animationId = requestAnimationFrame(frame);
@@ -2262,6 +2387,14 @@ export default function App() {
             <button
               type="button"
               className="fs-circuit-diagram-button"
+              onClick={() => setShowIVGraphExplanation(true)}
+            >
+              I-V graph explanation
+            </button>
+
+            <button
+              type="button"
+              className="fs-circuit-diagram-button"
               onClick={() => setShowCircuitDiagram(true)}
             >
               Show circuit diagram
@@ -2273,7 +2406,7 @@ export default function App() {
           <div className="fs-stage-controls" aria-label="Simulation controls">
             <div className="fs-voltage-control">
               <div className="fs-voltage-heading">
-                <strong>Potential difference</strong>
+                <strong>Potential difference:</strong>
                 <span className="fs-voltage-value">{voltage.toFixed(1)} V</span>
               </div>
 
@@ -2320,7 +2453,7 @@ export default function App() {
             </div>
 
             <div className="fs-control-side">
-              <div className="fs-actions">
+              <div className="fs-actions fs-actions-top">
                 <button
                   onClick={captureDataPoint}
                   style={{
@@ -2333,35 +2466,42 @@ export default function App() {
                   Capture data point
                 </button>
                 <button
+                  className="fs-clear-data-button"
+                  onClick={clearCapturedData}
+                  style={buttonStyle}
+                >
+                  Clear data
+                </button>
+                <button
+                  className="fs-pause-button"
                   onClick={() => setPaused((value) => !value)}
                   style={buttonStyle}
                 >
                   {paused ? "Resume" : "Pause"}
                 </button>
-                <button onClick={resetSimulation} style={buttonStyle}>
-                  Reset
-                </button>
-                <button onClick={clearCapturedData} style={buttonStyle}>
-                  Clear data
-                </button>
               </div>
 
-              <button
-                type="button"
-                className={`fs-terminal-electron-toggle${
-                  hideTerminalElectrons ? " is-active" : ""
-                }`}
-                onClick={() =>
-                  setHideTerminalElectrons((value) => !value)
-                }
-              >
-                {hideTerminalElectrons
-                  ? "Show terminal electrons"
-                  : "Hide terminal electrons"}
-              </button>
-
-              <div className="fs-control-detail">
-                Reservoir target: {targetCount} electrons · actual: {readout.reservoirCount}
+              <div className="fs-actions fs-actions-bottom">
+                <button
+                  type="button"
+                  className={`fs-terminal-electron-toggle${
+                    hideTerminalElectrons ? " is-active" : ""
+                  }`}
+                  onClick={() =>
+                    setHideTerminalElectrons((value) => !value)
+                  }
+                >
+                  {hideTerminalElectrons
+                    ? "Show terminal electrons"
+                    : "Hide terminal electrons"}
+                </button>
+                <button
+                  className="fs-refresh-electrons-button"
+                  onClick={resetSimulation}
+                  style={buttonStyle}
+                >
+                  Refresh electrons
+                </button>
               </div>
             </div>
           </div>
@@ -2369,10 +2509,23 @@ export default function App() {
           <div className="fs-stage-wrap">
             <canvas
               ref={canvasRef}
-              width={WIDTH}
-              height={HEIGHT}
+              width={WIDTH * CANVAS_RENDER_SCALE}
+              height={HEIGHT * CANVAS_RENDER_SCALE}
               className="fs-stage"
             />
+
+            <button
+              type="button"
+              className={`fs-trend-overlay-toggle${showTrendOverlay ? " is-active" : ""}`}
+              style={{
+                left: `${((ANALYSIS_X + ANALYSIS_WIDTH - 56) / WIDTH) * 100}%`,
+                top: `${((IV_PANEL_Y + 6) / HEIGHT) * 100}%`,
+              }}
+              aria-pressed={showTrendOverlay}
+              onClick={() => setShowTrendOverlay((value) => !value)}
+            >
+              Trend overlay
+            </button>
 
             <div
               className="fs-history-toggle"
@@ -2420,7 +2573,7 @@ export default function App() {
               <div className="fs-stage-readouts">
                 <ReadoutCard
                   label="Digital ammeter"
-                  value={`${readout.current.toFixed(3)} A`}
+                  value={`${readout.current.toFixed(1)} A`}
                   detail="5 s rolling average"
                   minimised={digitalCurrentMinimised}
                   onToggleMinimise={() =>
@@ -2501,6 +2654,106 @@ export default function App() {
                 easier to see how changing potential difference affects the
                 movement of electrons and therefore the current.
               </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showIVGraphExplanation && (
+        <div
+          className="fs-circuit-modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              setShowIVGraphExplanation(false);
+            }
+          }}
+        >
+          <div
+            className="fs-circuit-modal fs-density-modal fs-iv-explanation-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="fs-iv-explanation-modal-title"
+          >
+            <div className="fs-circuit-modal-header">
+              <h2 id="fs-iv-explanation-modal-title">
+                I-V graph explanation
+              </h2>
+              <button
+                type="button"
+                className="fs-circuit-modal-close"
+                onClick={() => setShowIVGraphExplanation(false)}
+                aria-label="Close I-V graph explanation"
+                title="Close"
+              >
+                ×
+              </button>
+            </div>
+
+            <div
+              className="fs-density-modal-body fs-iv-explanation-modal-body"
+              tabIndex={0}
+              aria-label="I-V graph explanation content"
+              onWheel={(event) => {
+                const panel = event.currentTarget;
+                if (panel.scrollHeight > panel.clientHeight) {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  panel.scrollTop += event.deltaY;
+                }
+              }}
+              onKeyDown={(event) => {
+                const panel = event.currentTarget;
+                const pageStep = panel.clientHeight * 0.85;
+                const keySteps = {
+                  ArrowDown: 36,
+                  ArrowUp: -36,
+                  PageDown: pageStep,
+                  PageUp: -pageStep,
+                  Home: -panel.scrollHeight,
+                  End: panel.scrollHeight,
+                };
+                if (Object.hasOwn(keySteps, event.key)) {
+                  event.preventDefault();
+                  panel.scrollTop += keySteps[event.key];
+                }
+              }}
+            >
+              <p>
+                An I-V characteristic shows how the current through a component
+                changes as the potential difference across it changes. Potential
+                difference is plotted on the horizontal axis in volts (V), and
+                current is plotted on the vertical axis in amperes (A).
+              </p>
+              <p>
+                Set a potential difference, wait for the current to settle, and
+                capture the reading. Repeating this at several positive and
+                negative voltages builds the characteristic curve.
+              </p>
+              <p>
+                At lower voltages, the filament is cooler and its resistance
+                changes relatively little, so the graph is approximately a
+                straight line. At higher voltages, the current heats the
+                filament. Its ions vibrate more, causing more collisions with
+                the moving electrons, so the resistance increases. The current
+                still rises, but by a smaller amount for each extra volt, making
+                the graph curve and become less steep.
+              </p>
+              <p>
+                For any captured point, resistance can be calculated using
+                R = V ÷ I. Because this graph plots current against voltage, a
+                shallower gradient indicates a higher resistance.
+              </p>
+
+              <h3>Summary</h3>
+              <ul>
+                <li>Potential difference (V) is on the horizontal axis.</li>
+                <li>Current (A) is on the vertical axis.</li>
+                <li>The curve passes through the origin and is roughly symmetrical.</li>
+                <li>A hotter filament has a greater resistance.</li>
+                <li>Greater resistance makes the I-V curve less steep.</li>
+                <li>Let each current reading settle before capturing it.</li>
+              </ul>
             </div>
           </div>
         </div>
@@ -2635,6 +2888,7 @@ function AnalogAmmeter({ current, minimised, onToggleMinimise }) {
             fontWeight: minimised ? 700 : 800,
             letterSpacing: minimised ? 0 : "0.04em",
             whiteSpace: "nowrap",
+            transform: minimised ? undefined : "translateX(8px)",
           }}
         >
           {minimised ? "Analogue ammeter" : "ANALOGUE AMMETER"}
@@ -2669,7 +2923,7 @@ function AnalogAmmeter({ current, minimised, onToggleMinimise }) {
             </linearGradient>
           </defs>
 
-          <g transform="translate(0 -53)">
+          <g transform="translate(0 -29)">
           <path
             d="M 34 164 A 146 130 0 0 1 326 164 L 326 184 L 34 184 Z"
             fill="url(#ammeter-face)"
@@ -2769,7 +3023,7 @@ function Thermometer({ temperature }) {
       }}
     >
       <rect
-        x="27"
+        x="7"
         y="12"
         width="18"
         height="136"
@@ -2779,7 +3033,7 @@ function Thermometer({ temperature }) {
         strokeWidth="3"
       />
       <rect
-        x="32"
+        x="12"
         y={fillY}
         width="8"
         height={fillHeight}
@@ -2787,14 +3041,14 @@ function Thermometer({ temperature }) {
         fill="#d83b2d"
       />
       <circle
-        cx="36"
+        cx="16"
         cy="148"
         r="17"
         fill="#d83b2d"
         stroke="#78858e"
         strokeWidth="3"
       />
-      <circle cx="36" cy="148" r="9" fill="#f45a45" />
+      <circle cx="16" cy="148" r="9" fill="#f45a45" />
 
       {[20, 500, 1000, 1500, 2000].map((value) => {
         const tickFraction = (value - minTemp) / (maxTemp - minTemp);
@@ -2802,15 +3056,15 @@ function Thermometer({ temperature }) {
         return (
           <g key={value}>
             <line
-              x1="47"
+              x1="27"
               y1={y}
-              x2="52"
+              x2="35"
               y2={y}
               stroke="#505d65"
               strokeWidth="2"
             />
             <text
-              x="54"
+              x="41"
               y={y}
               fontSize="14"
               fontWeight="700"
@@ -2850,7 +3104,13 @@ function TemperatureReadout({
         style={{
           minWidth: 0,
           flex: "1 1 auto",
-          paddingRight: onToggleMinimise ? 30 : 0,
+          paddingRight: onToggleMinimise ? 10 : 0,
+          alignSelf: minimised ? "auto" : "flex-start",
+          paddingTop: minimised ? 0 : 2,
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          textAlign: "center",
         }}
       >
         <div
@@ -2859,6 +3119,7 @@ function TemperatureReadout({
             color: "#687782",
             fontWeight: 700,
             lineHeight: 1.05,
+            transform: minimised ? undefined : "translateY(10px)",
           }}
         >
           <span style={{ display: "block" }}>Filament</span>
@@ -2869,7 +3130,7 @@ function TemperatureReadout({
           <>
             <div
               style={{
-                marginTop: 5,
+                marginTop: 25,
                 fontSize: 19,
                 fontWeight: 800,
                 fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
@@ -3166,6 +3427,55 @@ const layoutCss = `
     margin-bottom: 0;
   }
 
+  .fs-iv-explanation-modal {
+    display: flex;
+    flex-direction: column;
+    width: min(92vw, 650px);
+    max-height: min(88vh, 720px);
+  }
+
+  .fs-iv-explanation-modal-body {
+    display: block;
+    flex: 1 1 auto;
+    min-height: 0;
+    max-height: none;
+    overflow-y: auto;
+    scrollbar-gutter: stable;
+    scrollbar-width: thin;
+    scrollbar-color: #9aa9b5 #eef2f5;
+    text-align: left;
+  }
+
+  .fs-iv-explanation-modal-body::-webkit-scrollbar {
+    width: 10px;
+  }
+
+  .fs-iv-explanation-modal-body::-webkit-scrollbar-track {
+    background: #eef2f5;
+    border-radius: 999px;
+  }
+
+  .fs-iv-explanation-modal-body::-webkit-scrollbar-thumb {
+    border: 2px solid #eef2f5;
+    border-radius: 999px;
+    background: #9aa9b5;
+  }
+
+  .fs-iv-explanation-modal-body h3 {
+    margin: 18px 0 8px;
+    color: #19324a;
+    font-size: 16px;
+  }
+
+  .fs-iv-explanation-modal-body ul {
+    margin: 0;
+    padding-left: 22px;
+  }
+
+  .fs-iv-explanation-modal-body li + li {
+    margin-top: 5px;
+  }
+
   .fs-panel,
   .fs-stage-card {
     border: 1px solid #cbd5df;
@@ -3180,7 +3490,7 @@ const layoutCss = `
 
   .fs-control-layout {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 38%;
+    grid-template-columns: 190px minmax(0, 1fr);
     align-items: center;
     gap: clamp(16px, 2vw, 30px);
   }
@@ -3313,13 +3623,13 @@ const layoutCss = `
   .fs-stage-controls {
     position: absolute;
     z-index: 4;
-    left: 7.25%;
+    left: 3.75%;
     top: 3.1%;
-    width: 45%;
+    width: calc(50% - 6px);
     box-sizing: border-box;
     padding: clamp(3px, 0.3vw, 4.5px) clamp(5px, 0.45vw, 7px) clamp(5px, 0.42vw, 6.5px);
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 38%;
+    grid-template-columns: 240px minmax(0, 1fr);
     gap: clamp(6px, 0.65vw, 10px);
     align-items: center;
     border: 1px solid rgba(203, 213, 223, 0.92);
@@ -3330,29 +3640,37 @@ const layoutCss = `
   }
 
   .fs-stage-controls .fs-voltage-control {
-    transform: translateY(-2px);
+    transform: translateY(3px);
   }
 
   .fs-stage-controls .fs-voltage-heading {
+    width: 240px;
+    justify-content: center;
+    gap: 7px;
     font-size: clamp(10px, 0.82vw, 13px);
   }
 
   .fs-stage-controls .fs-voltage-value {
-    font-size: clamp(12px, 1vw, 15px);
-    transform: translateX(-100px);
+    padding: 0 5px;
+    border: 1px solid #9fc5ed;
+    border-radius: 5px;
+    background: #eaf4ff;
+    color: #174f7a;
+    font-size: clamp(11px, 0.9vw, 14px);
+    font-variant-numeric: tabular-nums;
   }
 
   .fs-stage-controls .fs-slider-wrap {
     width: 72%;
     min-width: 145px;
     margin-top: 2px;
-    padding-bottom: 8px;
+    padding-bottom: 20px;
   }
 
   .fs-stage-controls .fs-voltage-stepper {
-    grid-template-columns: 28px 180px 28px;
+    grid-template-columns: 25px 180px 25px;
     width: max-content;
-    margin-top: 0;
+    margin-top: 7px;
     gap: 5px;
   }
 
@@ -3369,10 +3687,10 @@ const layoutCss = `
   }
 
   .fs-stage-controls .fs-voltage-step-button {
-    width: 28px;
-    height: 28px;
-    font-size: 17px;
-    transform: translateY(2px);
+    width: 25px;
+    height: 25px;
+    font-size: 15px;
+    transform: translateY(-4px);
   }
 
   .fs-stage-controls .fs-slider-zero-tick {
@@ -3381,7 +3699,7 @@ const layoutCss = `
   }
 
   .fs-stage-controls .fs-slider-zero-label {
-    top: 15px;
+    top: 10px;
     font-size: 8px;
   }
 
@@ -3392,41 +3710,51 @@ const layoutCss = `
 
   .fs-stage-controls .fs-actions {
     display: grid;
-    grid-template-columns: repeat(4, auto);
     align-items: center;
-    justify-content: end;
+    justify-content: stretch;
     gap: 4px;
     min-width: 0;
   }
 
+  .fs-stage-controls .fs-actions-top {
+    grid-template-columns: 100px 68px 60px;
+    justify-content: end;
+  }
+
+  .fs-stage-controls .fs-actions-bottom {
+    grid-template-columns: 122px 110px;
+    justify-content: end;
+  }
+
   .fs-stage-controls .fs-actions button {
-    width: auto;
-    min-height: 25px !important;
+    width: 100%;
+    min-height: 28px !important;
     white-space: nowrap;
-    padding: 3px 7px !important;
-    font-size: clamp(8px, 0.62vw, 10px) !important;
-    border-radius: 7px !important;
+    padding: 4px 8px !important;
+    font-size: clamp(9px, 0.65vw, 10.5px) !important;
+    border-radius: 8px !important;
   }
 
   .fs-stage-controls .fs-control-side {
     display: grid;
-    grid-template-rows: auto auto auto;
+    grid-template-rows: auto auto;
     row-gap: 4px;
     align-content: center;
     justify-items: stretch;
-    width: 100%;
+    width: 236px;
     min-width: 0;
+    justify-self: end;
   }
 
   .fs-stage-controls .fs-terminal-electron-toggle {
     width: 100%;
-    min-height: 22px;
-    padding: 3px 7px;
+    min-height: 28px;
+    padding: 4px 8px;
     border: 1px solid #b77a52;
     border-radius: 7px;
     background: #fff8f2;
     color: #704328;
-    font-size: clamp(7px, 0.56vw, 9px);
+    font-size: clamp(8px, 0.62vw, 10px);
     font-weight: 750;
     line-height: 1.1;
     white-space: nowrap;
@@ -3459,6 +3787,31 @@ const layoutCss = `
     width: 100%;
     height: auto;
     aspect-ratio: ${WIDTH} / ${HEIGHT};
+  }
+
+  .fs-trend-overlay-toggle {
+    position: absolute;
+    z-index: 4;
+    height: 18px;
+    padding: 0 8px;
+    border: 1px solid #8d78b8;
+    border-radius: 5px;
+    background: #ffffff;
+    color: #5b3e97;
+    font: 700 9px/1 system-ui, sans-serif;
+    cursor: pointer;
+    white-space: nowrap;
+    transform: translateX(-100%);
+  }
+
+  .fs-trend-overlay-toggle.is-active {
+    background: #5b3e97;
+    color: #ffffff;
+  }
+
+  .fs-trend-overlay-toggle:focus-visible {
+    outline: 2px solid #8fc2f7;
+    outline-offset: 2px;
   }
 
 
@@ -3495,7 +3848,7 @@ const layoutCss = `
     box-sizing: border-box;
     padding: 0;
     display: grid;
-    grid-template-columns: minmax(0, 1.18fr) minmax(0, 0.82fr) minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1.08fr) minmax(0, 0.82fr) minmax(0, 1.1fr);
     gap: clamp(4px, 0.4vw, 7px);
     align-items: stretch;
     overflow: visible;
@@ -3582,13 +3935,18 @@ const layoutCss = `
     white-space: nowrap;
   }
 
+  .fs-stage-instruments .fs-analogue-card:not(.fs-collapsed) {
+    padding-inline: 0 !important;
+  }
+
   .fs-stage-instruments .fs-analogue-card svg {
-    width: 100% !important;
+    width: 110% !important;
     height: auto !important;
     min-height: 0;
     flex: 1 1 auto;
-    max-height: 104px;
+    max-height: 114px;
     margin-top: 2px !important;
+    transform: translateX(-4.55%);
   }
 
   .fs-stage-readouts {
@@ -3637,11 +3995,11 @@ const layoutCss = `
   }
 
   .fs-stage-instruments > .fs-instrument-card:last-child svg {
-    width: clamp(46px, 3.8vw, 60px) !important;
+    width: clamp(56px, 4.6vw, 72px) !important;
     height: auto !important;
-    max-height: 104px;
-    flex: 0 1 104px;
-    transform: translate(-12px, 8px);
+    max-height: 120px;
+    flex: 0 1 120px;
+    transform: translate(-15px, 4px);
     overflow: visible;
   }
 
@@ -3713,9 +4071,17 @@ const layoutCss = `
 
     .fs-stage-controls .fs-actions {
       display: grid;
-      grid-template-columns: repeat(3, auto);
-      justify-content: start;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      justify-content: stretch;
       min-width: 0;
+    }
+
+    .fs-stage-controls .fs-actions-top {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .fs-stage-controls .fs-actions-bottom {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
     .fs-stage-controls .fs-control-side {
@@ -3750,11 +4116,19 @@ const layoutCss = `
   @media (max-width: 680px) {
     .fs-stage-controls .fs-actions {
       display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: repeat(2, minmax(0, 1fr));
     }
     .fs-stage-controls .fs-actions button {
       width: 100%;
       padding-inline: 6px !important;
+    }
+
+    .fs-stage-controls .fs-actions-top {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .fs-stage-controls .fs-actions-bottom {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
     }
   }
 `;
