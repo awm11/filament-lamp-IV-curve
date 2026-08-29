@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import circuitDiagram from "./assets/circuit-diagram.svg";
+import negativeCircuitDiagram from "./assets/circuit-diagram (negative).svg";
+import positiveCircuitDiagram from "./assets/circuit-diagram (positive).svg";
+import uprightBulb from "./assets/upright-filament-bulb.svg";
 
 // The canvas is a single responsive stage. Its CSS size may change, but these
 // internal coordinates stay fixed so every drawn element scales together.
@@ -10,9 +12,9 @@ const CANVAS_RENDER_SCALE = 2;
 // The particle apparatus is rendered as one uniformly-scaled object. Physics
 // coordinates and the relative dimensions of reservoir / filament / sink / ions
 // remain unchanged.
-const PARTICLE_VIEW_SCALE = 0.79;
-const PARTICLE_VIEW_OFFSET_X = 108;
-const PARTICLE_VIEW_OFFSET_Y = 76; // fitted and centred in the left simulation pane
+const PARTICLE_VIEW_SCALE = 0.96;
+const PARTICLE_VIEW_OFFSET_X = 240;
+const PARTICLE_VIEW_OFFSET_Y = -103;
 
 // Shared analysis-column geometry. Keeping these in one place prevents the
 // I-V and time-series panels drifting to unrelated widths and margins.
@@ -22,7 +24,6 @@ const IV_PANEL_WIDTH = ANALYSIS_WIDTH; // all analysis panels now share the same
 const IV_PANEL_Y = 29;
 const IV_PANEL_HEIGHT = 491;
 const IV_PANEL_COLLAPSED_HEIGHT = 42;
-const HISTORY_PANEL_Y = 502;
 const HISTORY_PANEL_HEIGHT = 170;
 const HISTORY_PANEL_COLLAPSED_HEIGHT = 42;
 const INSTRUMENT_PANEL_HEIGHT = 174;
@@ -40,9 +41,16 @@ const instrumentPanelTop = (ivGraphMinimised, currentHistoryMinimised) =>
   ANALYSIS_PANEL_GAP;
 
 const AMBIENT_TEMP = 20;
+const DEFAULT_VOLTAGE = 2;
+const BULB_GLOW_START_TEMP = 400;
+const BULB_GLOW_FULL_TEMP = 1600;
 const MAX_VOLTAGE = 12;
 const MAX_RESERVOIR_ELECTRONS = 1382; // 96% of 1440 to preserve density in 0.96x chamber area
 const MAX_TOTAL_ELECTRONS = 2700;
+const SIMPLIFIED_PARTICLE_DIVISOR = 10;
+const SIMPLIFIED_MAX_TOTAL_ELECTRONS = Math.ceil(
+  MAX_TOTAL_ELECTRONS / SIMPLIFIED_PARTICLE_DIVISOR
+);
 
 const ELECTRON_RADIUS = 3.2;
 const WALL_BUFFER = ELECTRON_RADIUS + 2.5;
@@ -81,7 +89,19 @@ const CURRENT_SCALE = 0.03;
 const CURRENT_AVERAGE_WINDOW_MS = 5000;
 const COLLISION_DIAGNOSTIC_WINDOW_MS = 5000;
 const AMMETER_HISTORY_MS = 20000;
-const AMMETER_HISTORY_SAMPLE_MS = 250;
+const AMMETER_HISTORY_SAMPLE_MS = 500;
+const AMMETER_HISTORY_EDGE_BUFFER_MS = AMMETER_HISTORY_SAMPLE_MS * 2;
+const SIMPLIFIED_CURRENT_TRANSITION_MS = 1500;
+const SIMPLIFIED_CURRENT_NOISE_SAMPLE_MS = 500;
+const SIMPLIFIED_CURRENT_VARIATION_SD = 0.035;
+const SIMPLIFIED_CURRENT_VARIATION_LIMIT = 0.1;
+const SIMPLIFIED_FIELD_ACCELERATION_PER_AMP = 100;
+const SIMPLIFIED_MAX_ELECTRON_SPEED = 260;
+const SIMPLIFIED_COLLISION_RESTITUTION = 1;
+const SIMPLIFIED_COLLISION_SPEED_RETENTION = 0.6;
+const SIMPLIFIED_TRAIL_SAMPLE_INTERVAL = 0.0175;
+const SIMPLIFIED_TRAIL_POSITION_COUNT = 12;
+const SIMPLIFIED_NOOK_HOLD_SECONDS = 1;
 
 const RESERVOIR = {
   // Narrower and taller than the earlier baseline while keeping the
@@ -101,6 +121,23 @@ const FILAMENT = {
   width: 332,
   height: 708,
 };
+
+const MICROSCOPIC_FRAME_RENDER = {
+  x: (FILAMENT.x - 12) * PARTICLE_VIEW_SCALE + PARTICLE_VIEW_OFFSET_X,
+  y: (FILAMENT.y - 46) * PARTICLE_VIEW_SCALE + PARTICLE_VIEW_OFFSET_Y,
+  width: (FILAMENT.width + 24) * PARTICLE_VIEW_SCALE,
+  height: (FILAMENT.height + 64) * PARTICLE_VIEW_SCALE,
+};
+
+const MACRO_VIEW_OFFSET_X = -10;
+const MACRO_VIEW_OFFSET_Y = 30;
+const ZOOM_SOURCE = {
+  x: 285 + MACRO_VIEW_OFFSET_X,
+  y: 306 + MACRO_VIEW_OFFSET_Y,
+};
+const ZOOM_TARGET_OVERLAP = 20;
+const ZOOM_TARGET_TOP_INSET = 50;
+const ZOOM_TARGET_BOTTOM_INSET = 40;
 
 const SINK = {
   // Match the reshaped source reservoir. Keeping the same filament-side anchor
@@ -132,12 +169,6 @@ const SINK_NECK = {
 const LEFT_EXIT_X = RESERVOIR.x + 5;
 const RIGHT_EXIT_X = SINK.x + SINK.width - 5;
 const AMMETER_X = Math.round(FILAMENT.x + FILAMENT.width * 0.74);
-const SIMULATION_LABEL_FONT_SIZE = Math.round(17 * 1.1);
-const SIMULATION_DETAIL_FONT_SIZE = Math.round(11 * 1.1);
-const SIMULATION_DIRECTION_FONT_SIZE = Math.round(12 * 1.1);
-const ION_TEMPERATURE_LABEL_FONT_SIZE = Math.round(
-  SIMULATION_DETAIL_FONT_SIZE * 1.5
-);
 
 class Electron {
   constructor(x, y) {
@@ -289,9 +320,9 @@ function inConductor(electron) {
 }
 
 function flowDirection(potentialDifference) {
-  // Positive p.d. drives representative electrons left-to-right. Negative p.d.
-  // swaps the reservoir and sink, so the flow direction becomes right-to-left.
-  return potentialDifference < 0 ? -1 : 1;
+  // Keep the particle source intuitive relative to the slider: positive p.d.
+  // feeds electrons from the right, while negative p.d. feeds them from the left.
+  return potentialDifference < 0 ? 1 : -1;
 }
 
 function sourceRectFor(potentialDifference) {
@@ -313,12 +344,15 @@ function inSourceReservoir(electron, potentialDifference) {
   );
 }
 
-function voltageToTargetCount(voltage) {
+function voltageToTargetCount(voltage, simplifiedMotion = false) {
   // Electron density represents the magnitude of the potential difference.
   // The sign selects which side acts as the source reservoir.
-  return Math.round(
+  const fullTarget = Math.round(
     Math.sqrt(Math.abs(voltage) / MAX_VOLTAGE) * MAX_RESERVOIR_ELECTRONS
   );
+  return simplifiedMotion
+    ? Math.round(fullTarget / SIMPLIFIED_PARTICLE_DIVISOR)
+    : fullTarget;
 }
 
 function makeIonLattice() {
@@ -369,79 +403,30 @@ function makeIonLattice() {
   return ions;
 }
 
-function drawTerminalPositiveIonLattice(ctx, chamber) {
-  // Keep the terminal ions slightly smaller and closer together than the
-  // filament lattice so four decorative columns fit comfortably.
-  const visualRadius = ION_RADIUS * 1.65;
-  const edgeInset = 14;
-  const filamentRowCount = 12;
-  const rowSpacing =
-    (FILAMENT.height - edgeInset * 2) / (filamentRowCount - 0.5);
-
-  const left = chamber.x + 30;
-  const right = chamber.x + chamber.width - 30;
-  const top = chamber.y + edgeInset;
-  const bottom = chamber.y + chamber.height - edgeInset;
-  const columnCount = 4;
-  const columnSpacing = (right - left) / (columnCount - 1);
-
-  ctx.save();
-
-  // Keep the decorative lattice entirely inside the rounded terminal chamber.
-  drawRoundedRect(
-    ctx,
-    chamber.x,
-    chamber.y,
-    chamber.width,
-    chamber.height,
-    18
-  );
-  ctx.clip();
-
-  for (let column = 0; column < columnCount; column += 1) {
-    const x = left + column * columnSpacing;
-    const staggerY = column % 2 === 1 ? rowSpacing * 0.5 : 0;
-
-    for (
-      let y = top + staggerY;
-      y <= bottom + 0.001;
-      y += rowSpacing
-    ) {
-      // A soft, static cool-ion treatment keeps these in the background.
-      const g = ctx.createRadialGradient(
-        x - visualRadius * 0.32,
-        y - visualRadius * 0.32,
-        visualRadius * 0.12,
-        x,
-        y,
-        visualRadius
-      );
-      g.addColorStop(0, "rgba(210, 217, 223, 0.30)");
-      g.addColorStop(0.42, "rgba(135, 145, 154, 0.22)");
-      g.addColorStop(1, "rgba(69, 78, 87, 0.16)");
-
-      ctx.beginPath();
-      ctx.arc(x, y, visualRadius, 0, Math.PI * 2);
-      ctx.fillStyle = g;
-      ctx.fill();
-
-      ctx.fillStyle = "rgba(52, 62, 72, 0.38)";
-      ctx.font = `800 ${Math.round(visualRadius * 1.02)}px system-ui, sans-serif`;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText("+", x, y + 0.5);
-    }
-  }
-
-  ctx.restore();
-}
-
 function ionVibrationAmplitude(tempC) {
   const excess = Math.max(0, tempC - AMBIENT_TEMP);
 
   // Visual-only vibration. Keep the shake readable at high temperature without
   // affecting the larger invisible collision radius used by the physics.
   return 0.35 + Math.min(4.0, Math.sqrt(excess) * 0.10);
+}
+
+function temperatureHeatLevel(tempC) {
+  return Math.min(
+    1,
+    Math.max(0, (tempC - AMBIENT_TEMP) / (2000 - AMBIENT_TEMP))
+  );
+}
+
+function bulbGlowHeatLevel(tempC) {
+  return Math.min(
+    1,
+    Math.max(
+      0,
+      (tempC - BULB_GLOW_START_TEMP) /
+        (BULB_GLOW_FULL_TEMP - BULB_GLOW_START_TEMP)
+    )
+  );
 }
 
 function updateIons(ions, tempC, timeSeconds) {
@@ -455,17 +440,54 @@ function updateIons(ions, tempC, timeSeconds) {
   }
 }
 
-function positionIsClear(x, y, electrons, minimumSpacing = 11) {
-  const minimumSpacing2 = minimumSpacing * minimumSpacing;
-  for (const other of electrons) {
-    const dx = other.x - x;
-    const dy = other.y - y;
-    if (dx * dx + dy * dy < minimumSpacing2) return false;
-  }
-  return true;
+function makeElectronSpacingIndex(electrons, cellSize = 12) {
+  const buckets = new Map();
+  const keyFor = (cellX, cellY) => `${cellX}:${cellY}`;
+
+  const add = (electron) => {
+    const cellX = Math.floor(electron.x / cellSize);
+    const cellY = Math.floor(electron.y / cellSize);
+    const key = keyFor(cellX, cellY);
+    const bucket = buckets.get(key);
+    if (bucket) {
+      bucket.push(electron);
+    } else {
+      buckets.set(key, [electron]);
+    }
+  };
+
+  const isClear = (x, y, minimumSpacing = 11) => {
+    const centreCellX = Math.floor(x / cellSize);
+    const centreCellY = Math.floor(y / cellSize);
+    const cellReach = Math.ceil(minimumSpacing / cellSize);
+    const minimumSpacing2 = minimumSpacing * minimumSpacing;
+
+    for (let offsetY = -cellReach; offsetY <= cellReach; offsetY += 1) {
+      for (let offsetX = -cellReach; offsetX <= cellReach; offsetX += 1) {
+        const bucket = buckets.get(
+          keyFor(centreCellX + offsetX, centreCellY + offsetY)
+        );
+        if (!bucket) continue;
+
+        for (const other of bucket) {
+          const dx = other.x - x;
+          const dy = other.y - y;
+          if (dx * dx + dy * dy < minimumSpacing2) return false;
+        }
+      }
+    }
+    return true;
+  };
+
+  for (const electron of electrons) add(electron);
+  return { add, isClear };
 }
 
-function spawnOneElectron(electrons, potentialDifference) {
+function spawnOneElectron(
+  electrons,
+  potentialDifference,
+  spacingIndex = makeElectronSpacingIndex(electrons)
+) {
   const sourceRect = sourceRectFor(potentialDifference);
 
   const left = sourceRect.x + WALL_BUFFER + 5;
@@ -478,16 +500,23 @@ function spawnOneElectron(electrons, potentialDifference) {
     const y = top + Math.random() * Math.max(1, bottom - top);
 
     if (!insideAllowedRegion(x, y)) continue;
-    if (!positionIsClear(x, y, electrons)) continue;
+    if (!spacingIndex.isClear(x, y)) continue;
 
-    electrons.push(new Electron(x, y));
+    const electron = new Electron(x, y);
+    electrons.push(electron);
+    spacingIndex.add(electron);
     return true;
   }
 
   return false;
 }
 
-function rebuildReservoirPopulation(electrons, targetCount, potentialDifference) {
+function rebuildReservoirPopulation(
+  electrons,
+  targetCount,
+  potentialDifference,
+  maxTotalElectrons = MAX_TOTAL_ELECTRONS
+) {
   const sourceRect = sourceRectFor(potentialDifference);
 
   // Keep conductor electrons and anything outside the current source chamber,
@@ -495,6 +524,7 @@ function rebuildReservoirPopulation(electrons, targetCount, potentialDifference)
   const retained = electrons.filter(
     (electron) => !inSourceReservoir(electron, potentialDifference)
   );
+  const spacingIndex = makeElectronSpacingIndex(retained);
 
   const candidates = [];
   const spacing = 11.4;
@@ -519,15 +549,17 @@ function rebuildReservoirPopulation(electrons, targetCount, potentialDifference)
 
   const desired = Math.min(
     targetCount,
-    Math.max(0, MAX_TOTAL_ELECTRONS - retained.length)
+    Math.max(0, maxTotalElectrons - retained.length)
   );
   let added = 0;
 
   for (const point of candidates) {
     if (added >= desired) break;
     if (!insideAllowedRegion(point.x, point.y)) continue;
-    if (!positionIsClear(point.x, point.y, retained, 9.4)) continue;
-    retained.push(new Electron(point.x, point.y));
+    if (!spacingIndex.isClear(point.x, point.y, 9.4)) continue;
+    const electron = new Electron(point.x, point.y);
+    retained.push(electron);
+    spacingIndex.add(electron);
     added += 1;
   }
 
@@ -537,8 +569,10 @@ function rebuildReservoirPopulation(electrons, targetCount, potentialDifference)
     const x = left + Math.random() * Math.max(1, right - left);
     const y = top + Math.random() * Math.max(1, bottom - top);
     if (!insideAllowedRegion(x, y)) continue;
-    if (!positionIsClear(x, y, retained, 9.2)) continue;
-    retained.push(new Electron(x, y));
+    if (!spacingIndex.isClear(x, y, 9.2)) continue;
+    const electron = new Electron(x, y);
+    retained.push(electron);
+    spacingIndex.add(electron);
     added += 1;
   }
 
@@ -561,8 +595,14 @@ function conductorTargetCountFromReservoir(targetCount) {
   return Math.round(targetCount * 0.5 * (conductorArea / reservoirArea));
 }
 
-function seedConductorPopulation(electrons, ions, targetCount, potentialDifference) {
+function seedConductorPopulation(
+  electrons,
+  ions,
+  targetCount,
+  maxTotalElectrons = MAX_TOTAL_ELECTRONS
+) {
   const seeded = [...electrons];
+  const spacingIndex = makeElectronSpacingIndex(seeded);
   const candidates = [];
   const spacing = 11.6;
   const left = FILAMENT.x + WALL_BUFFER + 3;
@@ -587,7 +627,7 @@ function seedConductorPopulation(electrons, ions, targetCount, potentialDifferen
 
   const desired = Math.min(
     targetCount,
-    Math.max(0, MAX_TOTAL_ELECTRONS - seeded.length)
+    Math.max(0, maxTotalElectrons - seeded.length)
   );
   let added = 0;
 
@@ -596,7 +636,7 @@ function seedConductorPopulation(electrons, ions, targetCount, potentialDifferen
     if (!pointInRoundedRect(point.x, point.y, FILAMENT, 18, WALL_BUFFER)) {
       continue;
     }
-    if (!positionIsClear(point.x, point.y, seeded, 9.2)) continue;
+    if (!spacingIndex.isClear(point.x, point.y, 9.2)) continue;
 
     let clearOfIons = true;
     for (const ion of ions) {
@@ -612,27 +652,41 @@ function seedConductorPopulation(electrons, ions, targetCount, potentialDifferen
 
     const electron = new Electron(point.x, point.y);
     seeded.push(electron);
+    spacingIndex.add(electron);
     added += 1;
   }
 
   return seeded;
 }
 
-function makeInitialElectronPopulation(voltage, ions) {
-  const reservoirTarget = voltageToTargetCount(voltage);
-  let electrons = rebuildReservoirPopulation([], reservoirTarget, voltage);
+function makeInitialElectronPopulation(voltage, ions, simplifiedMotion = false) {
+  const reservoirTarget = voltageToTargetCount(voltage, simplifiedMotion);
+  const maxTotalElectrons = simplifiedMotion
+    ? SIMPLIFIED_MAX_TOTAL_ELECTRONS
+    : MAX_TOTAL_ELECTRONS;
+  let electrons = rebuildReservoirPopulation(
+    [],
+    reservoirTarget,
+    voltage,
+    maxTotalElectrons
+  );
   const conductorTarget = conductorTargetCountFromReservoir(reservoirTarget);
   electrons = seedConductorPopulation(
     electrons,
     ions,
     conductorTarget,
-    voltage
+    maxTotalElectrons
   );
   return electrons;
 }
 
-function maintainReservoirPopulation(electrons, targetCount, potentialDifference) {
-  if (electrons.length >= MAX_TOTAL_ELECTRONS) return;
+function maintainReservoirPopulation(
+  electrons,
+  targetCount,
+  potentialDifference,
+  maxTotalElectrons = MAX_TOTAL_ELECTRONS
+) {
+  if (electrons.length >= maxTotalElectrons) return;
 
   let currentCount = 0;
   for (const electron of electrons) {
@@ -641,7 +695,7 @@ function maintainReservoirPopulation(electrons, targetCount, potentialDifference
 
   const missing = Math.min(
     targetCount - currentCount,
-    MAX_TOTAL_ELECTRONS - electrons.length
+    maxTotalElectrons - electrons.length
   );
 
   if (missing <= 0) return;
@@ -650,8 +704,45 @@ function maintainReservoirPopulation(electrons, targetCount, potentialDifference
   // spawning fresh ones throughout the source reservoir body so the selected
   // density can be maintained even when the outer edge is crowded.
   const toSpawn = Math.min(missing, 30);
+  const spacingIndex = makeElectronSpacingIndex(electrons);
   for (let i = 0; i < toSpawn; i += 1) {
-    if (!spawnOneElectron(electrons, potentialDifference)) break;
+    if (!spawnOneElectron(electrons, potentialDifference, spacingIndex)) break;
+  }
+}
+
+function repelElectronPair(a, b, dt, soft2) {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const r2 = dx * dx + dy * dy;
+
+  if (r2 < 0.0001) return;
+
+  const distance = Math.sqrt(r2);
+  const nx = dx / distance;
+  const ny = dy / distance;
+  const acceleration = REPULSION_K / (r2 + soft2);
+
+  const dv = acceleration * dt;
+  a.vx -= nx * dv;
+  a.vy -= ny * dv;
+  b.vx += nx * dv;
+  b.vy += ny * dv;
+
+  const minimum = a.radius + b.radius;
+  if (distance < minimum) {
+    const overlap = minimum - distance;
+    const impulse = overlap * OVERLAP_PUSH * dt;
+    a.vx -= nx * impulse;
+    a.vy -= ny * impulse;
+    b.vx += nx * impulse;
+    b.vy += ny * impulse;
+
+    // Positional separation prevents a pair from remaining numerically glued.
+    const correction = overlap * 0.28;
+    a.x -= nx * correction;
+    a.y -= ny * correction;
+    b.x += nx * correction;
+    b.y += ny * correction;
   }
 }
 
@@ -659,43 +750,8 @@ function repelElectrons(electrons, dt) {
   const soft2 = REPULSION_SOFTENING * REPULSION_SOFTENING;
 
   for (let i = 0; i < electrons.length; i += 1) {
-    const a = electrons[i];
-
     for (let j = i + 1; j < electrons.length; j += 1) {
-      const b = electrons[j];
-      const dx = b.x - a.x;
-      const dy = b.y - a.y;
-      const r2 = dx * dx + dy * dy;
-
-      if (r2 < 0.0001) continue;
-
-      const distance = Math.sqrt(r2);
-      const nx = dx / distance;
-      const ny = dy / distance;
-      const acceleration = REPULSION_K / (r2 + soft2);
-
-      const dv = acceleration * dt;
-      a.vx -= nx * dv;
-      a.vy -= ny * dv;
-      b.vx += nx * dv;
-      b.vy += ny * dv;
-
-      const minimum = a.radius + b.radius;
-      if (distance < minimum) {
-        const overlap = minimum - distance;
-        const impulse = overlap * OVERLAP_PUSH * dt;
-        a.vx -= nx * impulse;
-        a.vy -= ny * impulse;
-        b.vx += nx * impulse;
-        b.vy += ny * impulse;
-
-        // Positional separation prevents a pair from remaining numerically glued.
-        const correction = overlap * 0.28;
-        a.x -= nx * correction;
-        a.y -= ny * correction;
-        b.x += nx * correction;
-        b.y += ny * correction;
-      }
+      repelElectronPair(electrons[i], electrons[j], dt, soft2);
     }
   }
 }
@@ -962,7 +1018,87 @@ function collisionScatterAtTemperature(tempC) {
   );
 }
 
-function scatterFromIons(electron, ions, tempC, current) {
+function escapeSimplifiedElectronFromWallNook(
+  electron,
+  ion,
+  minimumDistance,
+  current
+) {
+  const topY = FILAMENT.y + WALL_BUFFER + 0.75;
+  const bottomY = FILAMENT.y + FILAMENT.height - WALL_BUFFER - 0.75;
+  const detectionMargin = 2.5;
+  const inTopNook =
+    ion.y - minimumDistance <= topY + detectionMargin &&
+    electron.y < ion.y &&
+    electron.y <= topY + detectionMargin;
+  const inBottomNook =
+    ion.y + minimumDistance >= bottomY - detectionMargin &&
+    electron.y > ion.y &&
+    electron.y >= bottomY - detectionMargin;
+
+  if (!inTopNook && !inBottomNook) return false;
+
+  const fieldDirection =
+    Math.abs(current) > 0.002
+      ? current > 0
+        ? -1
+        : 1
+      : Math.sign(electron.vx) || Math.sign(electron.x - ion.x) || 1;
+  const existingSide = Math.sign(electron.x - ion.x) || fieldDirection;
+  const candidateDirections = [
+    fieldDirection,
+    existingSide,
+    -fieldDirection,
+  ].filter((direction, index, directions) =>
+    directions.indexOf(direction) === index
+  );
+  const escapeY = inTopNook ? topY : bottomY;
+  let escapeX = null;
+  let escapeDirection = fieldDirection;
+
+  for (const direction of candidateDirections) {
+    const candidateX =
+      ion.x + direction * (minimumDistance + electron.radius + 1.5);
+    if (
+      pointInRoundedRect(
+        candidateX,
+        escapeY,
+        FILAMENT,
+        18,
+        WALL_BUFFER
+      )
+    ) {
+      escapeX = candidateX;
+      escapeDirection = direction;
+      break;
+    }
+  }
+
+  if (escapeX === null) return false;
+
+  const incomingSpeed = Math.hypot(electron.vx, electron.vy);
+  const escapeSpeed = Math.max(24, Math.min(72, incomingSpeed * 0.65));
+  electron.x = escapeX;
+  electron.y = escapeY;
+  electron.oldX = escapeX;
+  electron.oldY = escapeY;
+  electron.vx = escapeDirection * escapeSpeed;
+  electron.vy = inTopNook
+    ? Math.max(8, Math.abs(electron.vy) * 0.3)
+    : -Math.max(8, Math.abs(electron.vy) * 0.3);
+  electron.trail = [];
+  electron.trailSampleElapsed = 0;
+  electron.nookHoldRemaining = SIMPLIFIED_NOOK_HOLD_SECONDS;
+  return true;
+}
+
+function scatterFromIons(
+  electron,
+  ions,
+  tempC,
+  current,
+  simplifiedMotion = false
+) {
   if (!pointInRoundedRect(electron.x, electron.y, FILAMENT, 18, 0)) {
     return { depositedHeat: 0, collisions: 0 };
   }
@@ -989,6 +1125,19 @@ function scatterFromIons(electron, ions, tempC, current) {
     electron.x += nx * (overlap + 0.25);
     electron.y += ny * (overlap + 0.25);
 
+    if (
+      simplifiedMotion &&
+      escapeSimplifiedElectronFromWallNook(
+        electron,
+        ion,
+        minimum,
+        current
+      )
+    ) {
+      if (normalVelocity < 0) collisions += 1;
+      continue;
+    }
+
     if (normalVelocity >= 0) continue;
 
     // Count only a genuine incoming impact. Merely remaining slightly overlapped
@@ -998,21 +1147,32 @@ function scatterFromIons(electron, ions, tempC, current) {
     const speed2Before =
       electron.vx * electron.vx + electron.vy * electron.vy;
 
-    // Inelastic reflection from a very massive ion.
-    electron.vx -= (1 + COLLISION_RESTITUTION) * normalVelocity * nx;
-    electron.vy -= (1 + COLLISION_RESTITUTION) * normalVelocity * ny;
+    if (simplifiedMotion) {
+      // Let the ion behave like a Plinko peg: the electron ricochets visibly,
+      // then the uniform field gradually restores its directed drift.
+      electron.vx -=
+        (1 + SIMPLIFIED_COLLISION_RESTITUTION) * normalVelocity * nx;
+      electron.vy -=
+        (1 + SIMPLIFIED_COLLISION_RESTITUTION) * normalVelocity * ny;
+      electron.vx *= SIMPLIFIED_COLLISION_SPEED_RETENTION;
+      electron.vy *= SIMPLIFIED_COLLISION_SPEED_RETENTION;
+    } else {
+      // Inelastic reflection from a very massive ion.
+      electron.vx -= (1 + COLLISION_RESTITUTION) * normalVelocity * nx;
+      electron.vy -= (1 + COLLISION_RESTITUTION) * normalVelocity * ny;
 
-    // Hotter ions cause stronger directional randomisation. Rotating the velocity
-    // preserves the electron speed here: the added resistance comes from loss of
-    // directed drift, not from arbitrary temperature-dependent damping.
-    const scatterStrength = collisionScatterAtTemperature(tempC);
-    const scatterAngle = (Math.random() - 0.5) * scatterStrength;
-    const cos = Math.cos(scatterAngle);
-    const sin = Math.sin(scatterAngle);
-    const vx = electron.vx;
-    const vy = electron.vy;
-    electron.vx = vx * cos - vy * sin;
-    electron.vy = vx * sin + vy * cos;
+      // Hotter ions cause stronger directional randomisation. Rotating the velocity
+      // preserves the electron speed here: the added resistance comes from loss of
+      // directed drift, not from arbitrary temperature-dependent damping.
+      const scatterStrength = collisionScatterAtTemperature(tempC);
+      const scatterAngle = (Math.random() - 0.5) * scatterStrength;
+      const cos = Math.cos(scatterAngle);
+      const sin = Math.sin(scatterAngle);
+      const vx = electron.vx;
+      const vy = electron.vy;
+      electron.vx = vx * cos - vy * sin;
+      electron.vy = vx * sin + vy * cos;
+    }
 
     const speed2After =
       electron.vx * electron.vx + electron.vy * electron.vy;
@@ -1037,140 +1197,90 @@ function drawRoundedRect(ctx, x, y, width, height, radius) {
   ctx.closePath();
 }
 
-function drawConnectorNeck(ctx, rect, copperSkinned = false) {
+function drawMicroscopicViewportBack(ctx, heatLevel) {
+  const frame = {
+    x: FILAMENT.x - 12,
+    y: FILAMENT.y - 46,
+    width: FILAMENT.width + 24,
+    height: FILAMENT.height + 64,
+  };
+
   ctx.save();
-
-  // Keep the physical neck itself the same dark conductor. When the copper
-  // skin is active, its overlay is drawn later on top of the electrons so the
-  // skin can fade smoothly toward the filament.
-  ctx.fillStyle = "rgb(78, 86, 94)";
-  ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
-
-  if (!copperSkinned) {
-    ctx.strokeStyle = "rgba(53, 61, 68, 0.96)";
-    ctx.lineWidth = 5;
-    ctx.lineCap = "round";
-    ctx.beginPath();
-    ctx.moveTo(rect.x + 2, rect.y);
-    ctx.lineTo(rect.x + rect.width - 2, rect.y);
-    ctx.moveTo(rect.x + 2, rect.y + rect.height);
-    ctx.lineTo(rect.x + rect.width - 2, rect.y + rect.height);
-    ctx.stroke();
-
-    ctx.strokeStyle = "rgba(255, 255, 255, 0.28)";
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.moveTo(rect.x + 5, rect.y + 5);
-    ctx.lineTo(rect.x + rect.width - 5, rect.y + 5);
-    ctx.moveTo(rect.x + 5, rect.y + rect.height - 5);
-    ctx.lineTo(rect.x + rect.width - 5, rect.y + rect.height - 5);
-    ctx.stroke();
-  }
-
+  ctx.shadowColor = "rgba(31, 50, 65, 0.18)";
+  ctx.shadowBlur = 18;
+  ctx.shadowOffsetY = 7;
+  drawRoundedRect(ctx, frame.x, frame.y, frame.width, frame.height, 26);
+  ctx.fillStyle = "#ffffff";
+  ctx.fill();
   ctx.restore();
-}
 
-function copperTerminalGradient(ctx, chamber) {
-  const gradient = ctx.createLinearGradient(
-    chamber.x,
-    chamber.y,
-    chamber.x + chamber.width,
-    chamber.y + chamber.height
-  );
-  gradient.addColorStop(0, "#dfa06a");
-  gradient.addColorStop(0.28, "#c77a42");
-  gradient.addColorStop(0.62, "#a95d2d");
-  gradient.addColorStop(1, "#d58a4e");
-  return gradient;
-}
-
-function drawCopperNeckFade(ctx) {
-  ctx.save();
-
-  // Left terminal: full copper at the terminal mouth, fading smoothly to
-  // transparent exactly as it reaches the filament.
-  const leftFade = ctx.createLinearGradient(
-    SOURCE_NECK.x - 3,
-    0,
-    SOURCE_NECK.x + SOURCE_NECK.width,
-    0
-  );
-  leftFade.addColorStop(0, "rgba(199, 122, 66, 1)");
-  leftFade.addColorStop(0.24, "rgba(199, 122, 66, 0.98)");
-  leftFade.addColorStop(0.55, "rgba(184, 101, 51, 0.72)");
-  leftFade.addColorStop(0.82, "rgba(169, 93, 45, 0.34)");
-  leftFade.addColorStop(1, "rgba(169, 93, 45, 0)");
-
-  ctx.fillStyle = leftFade;
-  ctx.fillRect(
-    SOURCE_NECK.x - 3,
-    SOURCE_NECK.y - 2,
-    SOURCE_NECK.width + 3,
-    SOURCE_NECK.height + 4
-  );
-
-  // Right terminal: mirror the same continuous fade.
-  const rightFade = ctx.createLinearGradient(
-    SINK_NECK.x,
-    0,
-    SINK_NECK.x + SINK_NECK.width + 3,
-    0
-  );
-  rightFade.addColorStop(0, "rgba(169, 93, 45, 0)");
-  rightFade.addColorStop(0.18, "rgba(169, 93, 45, 0.34)");
-  rightFade.addColorStop(0.45, "rgba(184, 101, 51, 0.72)");
-  rightFade.addColorStop(0.76, "rgba(199, 122, 66, 0.98)");
-  rightFade.addColorStop(1, "rgba(199, 122, 66, 1)");
-
-  ctx.fillStyle = rightFade;
-  ctx.fillRect(
-    SINK_NECK.x,
-    SINK_NECK.y - 2,
-    SINK_NECK.width + 3,
-    SINK_NECK.height + 4
-  );
-
-  // A very soft warm highlight ties the neck skin into the terminal skin
-  // without recreating the old dark, hard-edged neck border.
-  ctx.globalAlpha = 0.22;
-  ctx.strokeStyle = "#f1c39e";
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(SOURCE_NECK.x, SOURCE_NECK.y + 2);
-  ctx.lineTo(SOURCE_NECK.x + SOURCE_NECK.width * 0.58, SOURCE_NECK.y + 2);
-  ctx.moveTo(SOURCE_NECK.x, SOURCE_NECK.y + SOURCE_NECK.height - 2);
-  ctx.lineTo(
-    SOURCE_NECK.x + SOURCE_NECK.width * 0.58,
-    SOURCE_NECK.y + SOURCE_NECK.height - 2
-  );
-  ctx.moveTo(SINK_NECK.x + SINK_NECK.width * 0.42, SINK_NECK.y + 2);
-  ctx.lineTo(SINK_NECK.x + SINK_NECK.width, SINK_NECK.y + 2);
-  ctx.moveTo(
-    SINK_NECK.x + SINK_NECK.width * 0.42,
-    SINK_NECK.y + SINK_NECK.height - 2
-  );
-  ctx.lineTo(
-    SINK_NECK.x + SINK_NECK.width,
-    SINK_NECK.y + SINK_NECK.height - 2
-  );
+  drawRoundedRect(ctx, frame.x, frame.y, frame.width, frame.height, 26);
+  ctx.strokeStyle = "rgba(116, 137, 151, 0.72)";
+  ctx.lineWidth = 2;
   ctx.stroke();
 
+  ctx.fillStyle = "#20364a";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.font = "800 15px system-ui, sans-serif";
+  ctx.fillText(
+    "MICROSCOPIC VIEW",
+    FILAMENT.x + FILAMENT.width / 2,
+    FILAMENT.y - 29
+  );
+  ctx.fillStyle = "#687985";
+  ctx.font = "700 10px system-ui, sans-serif";
+  ctx.fillText(
+    "NOT TO SCALE",
+    FILAMENT.x + FILAMENT.width / 2,
+    FILAMENT.y - 13
+  );
+
+  const glowStrength = Math.pow(heatLevel, 0.72);
+  ctx.save();
+  ctx.shadowColor = `rgba(255, 103, 24, ${glowStrength * 0.82})`;
+  ctx.shadowBlur = 6 + glowStrength * 44;
+  drawRoundedRect(
+    ctx,
+    FILAMENT.x,
+    FILAMENT.y,
+    FILAMENT.width,
+    FILAMENT.height,
+    18
+  );
+  ctx.fillStyle = "rgb(78, 86, 94)";
+  ctx.fill();
   ctx.restore();
 }
 
-function drawAmmeterBack(ctx) {
-  const cx = AMMETER_X;
-  const cy = FILAMENT.y + FILAMENT.height / 2;
-  const rx = 53;
-  const ry = 389; // 25% shorter ammeter loop
+function drawMicroscopicViewportFront(ctx, heatLevel) {
+  const glowStrength = Math.pow(heatLevel, 0.72);
+  drawRoundedRect(
+    ctx,
+    FILAMENT.x,
+    FILAMENT.y,
+    FILAMENT.width,
+    FILAMENT.height,
+    18
+  );
+  const borderR = Math.round(53 + 99 * glowStrength);
+  const borderG = Math.round(61 + 26 * glowStrength);
+  const borderB = Math.round(68 - 42 * glowStrength);
+  ctx.strokeStyle = `rgba(${borderR}, ${borderG}, ${borderB}, 0.96)`;
+  ctx.lineWidth = 4;
+  ctx.stroke();
 
   ctx.save();
-  ctx.strokeStyle = "rgba(117, 24, 24, 0.88)";
-  ctx.lineWidth = 9;
-  ctx.beginPath();
-  // Left half is drawn before the conductor so it visibly passes
-  // behind the filament/wire.
-  ctx.ellipse(cx, cy, rx, ry, 0, Math.PI / 2, (Math.PI * 3) / 2);
+  drawRoundedRect(
+    ctx,
+    FILAMENT.x + 5,
+    FILAMENT.y + 5,
+    FILAMENT.width - 10,
+    FILAMENT.height - 10,
+    14
+  );
+  ctx.strokeStyle = `rgba(255, ${Math.round(255 - 45 * glowStrength)}, ${Math.round(255 - 105 * glowStrength)}, ${0.18 + glowStrength * 0.48})`;
+  ctx.lineWidth = 1.5;
   ctx.stroke();
   ctx.restore();
 }
@@ -1323,7 +1433,15 @@ function drawTimeSeriesPanel(
     ctx.rect(plotLeft, plotTop, plotWidth, plotHeight);
     ctx.clip();
 
-    ctx.strokeStyle = lineColor;
+    const edgeFade = ctx.createLinearGradient(
+      plotLeft,
+      0,
+      plotLeft + Math.min(42, plotWidth * 0.08),
+      0
+    );
+    edgeFade.addColorStop(0, "rgba(212, 49, 49, 0)");
+    edgeFade.addColorStop(1, lineColor);
+    ctx.strokeStyle = edgeFade;
     ctx.lineWidth = 2;
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
@@ -1364,7 +1482,8 @@ function drawAmmeterHistory(
   history,
   voltageEvents,
   now,
-  current,
+  liveCurrent,
+  displayedCurrent,
   topY,
   minimised = false
 ) {
@@ -1391,9 +1510,20 @@ function drawAmmeterHistory(
 
     ctx.textAlign = "right";
     ctx.font = "700 12px ui-monospace, SFMono-Regular, Menlo, monospace";
-    ctx.fillText(`${current.toFixed(3)} A`, x + width - 56, topY + height / 2);
+    ctx.fillText(
+      `${displayedCurrent.toFixed(3)} A`,
+      x + width - 56,
+      topY + height / 2
+    );
     return;
   }
+
+  // The stored points and header value update every 500 ms, but this live
+  // endpoint lets the trace move continuously between those samples.
+  const renderedHistory = [
+    ...history,
+    { time: now, current: liveCurrent },
+  ];
 
   drawTimeSeriesPanel(ctx, {
     x,
@@ -1401,8 +1531,8 @@ function drawAmmeterHistory(
     width,
     height: HISTORY_PANEL_HEIGHT,
     title: "CURRENT OVER TIME",
-    valueText: `${current.toFixed(3)} A`,
-    history,
+    valueText: `${displayedCurrent.toFixed(3)} A`,
+    history: renderedHistory,
     valueKey: "current",
     now,
     unit: "A",
@@ -1414,31 +1544,10 @@ function drawAmmeterHistory(
   });
 }
 
-function drawAmmeterFront(ctx, current, history, voltageEvents, now, drawHistory = true) {
-  const cx = AMMETER_X;
-  const cy = FILAMENT.y + FILAMENT.height / 2;
-  const rx = 53;
-  const ry = 389; // 25% shorter ammeter loop
-
-  ctx.save();
-  ctx.strokeStyle = "rgba(255, 65, 65, 0.97)";
-  ctx.lineWidth = 9;
-  ctx.beginPath();
-  // Right half is drawn after the conductor so it sits in front of
-  // the filament/wire.
-  ctx.ellipse(cx, cy, rx, ry, 0, -Math.PI / 2, Math.PI / 2);
-  ctx.stroke();
-
-  if (drawHistory) {
-    drawAmmeterHistory(ctx, history, voltageEvents, now, current);
-  }
-  ctx.restore();
-}
-
-
 function filamentTrendCurrent(voltage) {
   const straightLimit = 5.5;
-  const lowVoltageGradient = 0.429;
+  const lowVoltageGradient = 0.495;
+  const currentAtMaxVoltage = 3.9;
   const magnitude = Math.abs(voltage);
 
   if (magnitude <= straightLimit) {
@@ -1447,14 +1556,133 @@ function filamentTrendCurrent(voltage) {
 
   // Match the straight section's gradient at 5.5 V, then reduce the gradient
   // smoothly to model the rising resistance of a heating filament.
-  // These values put the guide at 3.9 A at 12 V while preserving a smooth
-  // join to the straight section.
-  const bendScale = 4.88;
+  // The slightly steeper initial gradient is paired with a tighter bend. The
+  // normalised exponential keeps the guide at exactly 3.9 A at 12 V while
+  // retaining a smooth join to the straight section.
+  const bendScale = 2.58908;
   const extraVoltage = magnitude - straightLimit;
+  const maximumExtraVoltage = MAX_VOLTAGE - straightLimit;
+  const bendProgress =
+    (1 - Math.exp(-extraVoltage / bendScale)) /
+    (1 - Math.exp(-maximumExtraVoltage / bendScale));
   const currentMagnitude =
     straightLimit * lowVoltageGradient +
-    lowVoltageGradient * bendScale * (1 - Math.exp(-extraVoltage / bendScale));
+    (currentAtMaxVoltage - straightLimit * lowVoltageGradient) * bendProgress;
   return Math.sign(voltage) * currentMagnitude;
+}
+
+function sampleCappedNormalCurrentVariation() {
+  // Box-Muller transform: most samples sit close to zero, with the rare tails
+  // capped so the simplified model never departs by more than 0.1 A.
+  let u = 0;
+  let v = 0;
+  while (u === 0) u = Math.random();
+  while (v === 0) v = Math.random();
+  const normalSample =
+    Math.sqrt(-2 * Math.log(u)) * Math.cos(Math.PI * 2 * v);
+  return Math.max(
+    -SIMPLIFIED_CURRENT_VARIATION_LIMIT,
+    Math.min(
+      SIMPLIFIED_CURRENT_VARIATION_LIMIT,
+      normalSample * SIMPLIFIED_CURRENT_VARIATION_SD
+    )
+  );
+}
+
+function simplifiedBaseCurrentTarget(voltage) {
+  if (Math.abs(voltage) < 0.001) return 0;
+  return filamentTrendCurrent(voltage);
+}
+
+function simplifiedCurrentDuringTransition(transition, now) {
+  const progress = Math.max(
+    0,
+    Math.min(1, (now - transition.start) / SIMPLIFIED_CURRENT_TRANSITION_MS)
+  );
+  const easedProgress = progress * progress * (3 - 2 * progress);
+  return transition.from + (transition.to - transition.from) * easedProgress;
+}
+
+function simplifiedNoiseDuringTransition(transition, now) {
+  const progress = Math.max(
+    0,
+    Math.min(
+      1,
+      (now - transition.start) / SIMPLIFIED_CURRENT_NOISE_SAMPLE_MS
+    )
+  );
+  const easedProgress = progress * progress * (3 - 2 * progress);
+  return transition.from + (transition.to - transition.from) * easedProgress;
+}
+
+function nextSimplifiedNoiseTarget(voltage) {
+  return Math.abs(voltage) < 0.001
+    ? 0
+    : sampleCappedNormalCurrentVariation();
+}
+
+function simplifiedEquilibriumTemperature(voltage, current) {
+  const electricalPower = Math.abs(voltage * current);
+  const temperatureRise = 69 * Math.pow(electricalPower, 0.814);
+  return Math.min(
+    BULB_GLOW_FULL_TEMP,
+    AMBIENT_TEMP + temperatureRise
+  );
+}
+
+function applySimplifiedElectronMotion(
+  electron,
+  dt,
+  potentialDifference,
+  current
+) {
+  const direction =
+    Math.abs(current) > 0.002
+      ? current > 0
+        ? -1
+        : 1
+      : flowDirection(potentialDifference);
+
+  // New and full-mode particles enter this deliberately small simplified
+  // state once. This prevents any old steering or repulsion velocity from
+  // leaking into the uniform-field model.
+  if (!electron.simplifiedMotionInitialised) {
+    const verticalDirection = Math.random() < 0.5 ? -1 : 1;
+    electron.vx = 0;
+    electron.vy = verticalDirection * (10 + Math.random() * 50);
+    electron.trail = [];
+    electron.trailSampleElapsed = 0;
+    electron.simplifiedMotionInitialised = true;
+  }
+
+  // This is the complete between-collision model: the same constant horizontal
+  // acceleration acts on every electron. Transverse speed remains untouched;
+  // only an ion or wall collision may change the direction of motion.
+  electron.vx +=
+    direction * SIMPLIFIED_FIELD_ACCELERATION_PER_AMP * Math.abs(current) * dt;
+
+  // A high safety ceiling prevents numerical tunnelling after an unusually
+  // long collision-free run without shaping ordinary motion.
+  const speed = Math.hypot(electron.vx, electron.vy);
+  if (speed > SIMPLIFIED_MAX_ELECTRON_SPEED) {
+    const scale = SIMPLIFIED_MAX_ELECTRON_SPEED / speed;
+    electron.vx *= scale;
+    electron.vy *= scale;
+  }
+}
+
+function recordSimplifiedElectronTrail(electron, dt) {
+  electron.trailSampleElapsed += dt;
+  if (electron.trailSampleElapsed < SIMPLIFIED_TRAIL_SAMPLE_INTERVAL) return;
+
+  electron.trailSampleElapsed %= SIMPLIFIED_TRAIL_SAMPLE_INTERVAL;
+  electron.trail.push({ x: electron.x, y: electron.y });
+  if (electron.trail.length > SIMPLIFIED_TRAIL_POSITION_COUNT) {
+    electron.trail.splice(
+      0,
+      electron.trail.length - SIMPLIFIED_TRAIL_POSITION_COUNT
+    );
+  }
 }
 
 function drawIVGraph(ctx, points, minimised = false, showTrendOverlay = false) {
@@ -1674,39 +1902,7 @@ function drawIVGraph(ctx, points, minimised = false, showTrendOverlay = false) {
   ctx.restore();
 }
 
-function drawApparatusLabel(ctx, text, component, gap, xOffset = 0) {
-  ctx.save();
-  ctx.fillStyle = "#26313a";
-  ctx.font = `700 ${SIMULATION_LABEL_FONT_SIZE}px system-ui, sans-serif`;
-  ctx.textAlign = "center";
-  ctx.textBaseline = "bottom";
-  ctx.fillText(
-    text,
-    component.x + component.width / 2 + xOffset,
-    component.y - gap
-  );
-  ctx.restore();
-}
-
-function drawSimulationLabel(ctx, text, x, y) {
-  ctx.save();
-  ctx.fillStyle = "#26313a";
-  ctx.font = `700 ${SIMULATION_LABEL_FONT_SIZE}px system-ui, sans-serif`;
-  ctx.textAlign = "center";
-  ctx.textBaseline = "bottom";
-  const lines = Array.isArray(text) ? text : [text];
-  const lineHeight = SIMULATION_LABEL_FONT_SIZE + 2;
-  for (let index = 0; index < lines.length; index += 1) {
-    ctx.fillText(
-      lines[index],
-      x,
-      y - (lines.length - 1 - index) * lineHeight
-    );
-  }
-  ctx.restore();
-}
-
-function drawScene(ctx, electrons, ions, tempC, voltage, current, resistance, targetCount, measurementHistory, voltageEvents, ivPoints, now, ivGraphMinimised, currentHistoryMinimised, hideTerminalElectrons, showTrendOverlay) {
+function drawScene(ctx, electrons, ions, tempC, liveCurrent, displayedHistoryCurrent, measurementHistory, voltageEvents, ivPoints, now, ivGraphMinimised, currentHistoryMinimised, showTrendOverlay) {
   ctx.clearRect(0, 0, WIDTH, HEIGHT);
 
   const gradient = ctx.createLinearGradient(0, 0, 0, HEIGHT);
@@ -1715,73 +1911,21 @@ function drawScene(ctx, electrons, ions, tempC, voltage, current, resistance, ta
   ctx.fillStyle = gradient;
   ctx.fillRect(0, 0, WIDTH, HEIGHT);
 
-  const direction = flowDirection(voltage);
-  const sourceRect = sourceRectFor(voltage);
-  const sinkRect = sinkRectFor(voltage);
-
   // Scale only the rendered particle apparatus. The simulation itself continues
   // to use the original coordinates, sizes, velocities and collision geometry.
   ctx.save();
   ctx.translate(PARTICLE_VIEW_OFFSET_X, PARTICLE_VIEW_OFFSET_Y);
   ctx.scale(PARTICLE_VIEW_SCALE, PARTICLE_VIEW_SCALE);
 
-  drawApparatusLabel(ctx, "Metal filament", FILAMENT, 14, -30);
-  drawSimulationLabel(
-    ctx,
-    ["Electron flow", "detector"],
-    AMMETER_X,
-    FILAMENT.y - 40
-  );
+  const heatLevel = temperatureHeatLevel(tempC);
 
-  drawAmmeterBack(ctx);
-
-  // Draw the two equal chambers according to their current roles. A negative
-  // potential difference swaps reservoir and sink positions without moving the
-  // central filament.
-  for (const chamber of [RESERVOIR, SINK]) {
-    const isSource = chamber === sourceRect;
-    drawRoundedRect(ctx, chamber.x, chamber.y, chamber.width, chamber.height, 18);
-    ctx.fillStyle = hideTerminalElectrons
-      ? copperTerminalGradient(ctx, chamber)
-      : isSource
-        ? "#edf6fb"
-        : "#eef3f6";
-    ctx.fill();
-    ctx.strokeStyle = "#7e919e";
-    ctx.lineWidth = 5;
-    ctx.stroke();
-
-    drawTerminalPositiveIonLattice(ctx, chamber);
-
-    drawApparatusLabel(
-      ctx,
-      isSource ? "Negative terminal" : "Positive terminal",
-      chamber,
-      10
-    );
-  }
-
-  drawRoundedRect(
-    ctx,
-    FILAMENT.x,
-    FILAMENT.y,
-    FILAMENT.width,
-    FILAMENT.height,
-    18
-  );
-  ctx.fillStyle = "rgb(78, 86, 94)";
-  ctx.fill();
-  ctx.strokeStyle = "rgba(53, 61, 68, 0.96)";
-  ctx.lineWidth = 5;
-  ctx.stroke();
-
-  drawConnectorNeck(ctx, SOURCE_NECK, hideTerminalElectrons);
-  drawConnectorNeck(ctx, SINK_NECK, hideTerminalElectrons);
+  // The reservoirs and connector necks remain part of the live physics model,
+  // but the learner sees only this magnified window into the filament itself.
+  drawMicroscopicViewportBack(ctx, heatLevel);
 
   // Heat colour is deliberately visual rather than black-body accurate.
   // Cold ions start neutral grey, then warm progressively through rust/red
   // into orange/amber over an even 20 C -> 2000 C temperature scale.
-  const heatLevel = Math.min(1, Math.max(0, (tempC - AMBIENT_TEMP) / (2000 - AMBIENT_TEMP)));
   const heatStops = [
     { t: 0.00, rgb: [118, 126, 134] },  // cool steel grey -- 20 C
     { t: 0.25, rgb: [148, 105, 88] },  // warm grey / rust -- ~515 C
@@ -1805,6 +1949,17 @@ function drawScene(ctx, electrons, ions, tempC, voltage, current, resistance, ta
   }
 
   const [heatR, heatG, heatB] = sampleHeatColour(heatLevel);
+
+  ctx.save();
+  drawRoundedRect(
+    ctx,
+    FILAMENT.x,
+    FILAMENT.y,
+    FILAMENT.width,
+    FILAMENT.height,
+    18
+  );
+  ctx.clip();
 
   for (const ion of ions) {
     // Draw ions 20% larger without changing ion.radius itself. The stored radius
@@ -1843,56 +1998,52 @@ function drawScene(ctx, electrons, ions, tempC, voltage, current, resistance, ta
     ctx.restore();
   }
 
-  // Compact legend for the ion heat scale.
-  const legendW = Math.min(210, FILAMENT.width - 20);
-  const legendX = FILAMENT.x + (FILAMENT.width - legendW) / 2;
-  const legendY = FILAMENT.y + FILAMENT.height + 54;
-  const legendH = 9;
-  const heatLegend = ctx.createLinearGradient(legendX, 0, legendX + legendW, 0);
-  for (const stop of heatStops) {
-    const [r, g, b] = stop.rgb;
-    heatLegend.addColorStop(stop.t, `rgb(${r}, ${g}, ${b})`);
-  }
-  drawRoundedRect(ctx, legendX, legendY, legendW, legendH, 4.5);
-  ctx.fillStyle = heatLegend;
-  ctx.fill();
-  ctx.strokeStyle = "rgba(72, 79, 86, 0.55)";
-  ctx.lineWidth = 1;
-  ctx.stroke();
-  ctx.fillStyle = "#52606d";
-  ctx.font = `${SIMULATION_DETAIL_FONT_SIZE}px system-ui, sans-serif`;
-  ctx.textBaseline = "alphabetic";
-  ctx.textAlign = "left";
-  ctx.fillText("20 °C", legendX, legendY + 23);
-  ctx.textAlign = "center";
-  ctx.font = `${ION_TEMPERATURE_LABEL_FONT_SIZE}px system-ui, sans-serif`;
-  ctx.fillText("Ion temperature", legendX + legendW / 2 - 10, legendY - 16);
-  ctx.textAlign = "right";
-  ctx.font = `${SIMULATION_DETAIL_FONT_SIZE}px system-ui, sans-serif`;
-  ctx.fillText("2000 °C+", legendX + legendW, legendY + 23);
+  ctx.restore();
+
+  ctx.save();
+  drawRoundedRect(
+    ctx,
+    FILAMENT.x,
+    FILAMENT.y,
+    FILAMENT.width,
+    FILAMENT.height,
+    18
+  );
+  ctx.clip();
 
   for (const electron of electrons) {
-    const inTerminalBody =
-      (pointInRect(electron.x, electron.y, RESERVOIR, 0) ||
-        pointInRect(electron.x, electron.y, SINK, 0)) &&
-      !inConductor(electron);
+    if (electron.nookHoldRemaining > 0) continue;
+    if (!inConductor(electron)) continue;
 
-    if (hideTerminalElectrons && inTerminalBody) {
-      continue;
+    if (electron.trail?.length) {
+      ctx.save();
+      ctx.globalCompositeOperation = "lighter";
+      for (let index = 0; index < electron.trail.length; index += 1) {
+        const position = electron.trail[index];
+        const recency = (index + 1) / electron.trail.length;
+        const alpha = 0.025 + Math.pow(recency, 1.7) * 0.2;
+        const radius = electron.radius * (0.25 + recency * 0.42);
+        ctx.beginPath();
+        ctx.arc(position.x, position.y, radius, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(99, 217, 255, ${alpha})`;
+        ctx.fill();
+      }
+      ctx.restore();
+    } else {
+      // Detailed mode retains its compact instantaneous velocity mark.
+      const speed = Math.hypot(electron.vx, electron.vy);
+      const trailScale = Math.min(0.08, 3.8 / Math.max(speed, 1));
+
+      ctx.beginPath();
+      ctx.moveTo(electron.x, electron.y);
+      ctx.lineTo(
+        electron.x - electron.vx * trailScale,
+        electron.y - electron.vy * trailScale
+      );
+      ctx.strokeStyle = "rgba(38, 175, 232, 0.28)";
+      ctx.lineWidth = 2;
+      ctx.stroke();
     }
-
-    const speed = Math.hypot(electron.vx, electron.vy);
-    const trailScale = Math.min(0.08, 3.8 / Math.max(speed, 1));
-
-    ctx.beginPath();
-    ctx.moveTo(electron.x, electron.y);
-    ctx.lineTo(
-      electron.x - electron.vx * trailScale,
-      electron.y - electron.vy * trailScale
-    );
-    ctx.strokeStyle = "rgba(38, 175, 232, 0.28)";
-    ctx.lineWidth = 2;
-    ctx.stroke();
 
     const g = ctx.createRadialGradient(
       electron.x - electron.radius * 0.35,
@@ -1912,38 +2063,9 @@ function drawScene(ctx, electrons, ions, tempC, voltage, current, resistance, ta
     ctx.fill();
   }
 
-  if (hideTerminalElectrons) {
-    drawCopperNeckFade(ctx);
-  }
-
-  ctx.save();
-  ctx.setLineDash([4, 5]);
-  ctx.strokeStyle = "rgba(185, 45, 45, 0.25)";
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(AMMETER_X, FILAMENT.y + 10);
-  ctx.lineTo(AMMETER_X, FILAMENT.y + FILAMENT.height - 10);
-  ctx.stroke();
   ctx.restore();
 
-  drawAmmeterFront(
-    ctx,
-    current,
-    measurementHistory,
-    voltageEvents,
-    now,
-    false
-  );
-
-  ctx.fillStyle = "#5b6770";
-  ctx.textAlign = "center";
-  ctx.font = `${SIMULATION_DIRECTION_FONT_SIZE}px system-ui, sans-serif`;
-  ctx.textBaseline = "alphabetic";
-  ctx.fillText(
-    direction > 0 ? "electrons leave →" : "← electrons leave",
-    sinkRect.x + sinkRect.width / 2,
-    sinkRect.y + sinkRect.height - 14
-  );
+  drawMicroscopicViewportFront(ctx, heatLevel);
 
   ctx.restore();
 
@@ -1953,7 +2075,8 @@ function drawScene(ctx, electrons, ions, tempC, voltage, current, resistance, ta
     measurementHistory,
     voltageEvents,
     now,
-    current,
+    liveCurrent,
+    displayedHistoryCurrent,
     historyPanelTop(ivGraphMinimised),
     currentHistoryMinimised
   );
@@ -1961,26 +2084,46 @@ function drawScene(ctx, electrons, ions, tempC, voltage, current, resistance, ta
 }
 export default function App() {
   const canvasRef = useRef(null);
+  const microscopicOverlayRef = useRef(null);
   const electronsRef = useRef([]);
   const ionsRef = useRef(makeIonLattice());
-  const voltageRef = useRef(6);
+  const voltageRef = useRef(DEFAULT_VOLTAGE);
   const temperatureRef = useRef(AMBIENT_TEMP);
   const currentRef = useRef(0);
   const crossingsRef = useRef([]);
   const collisionDiagnosticRef = useRef([]);
   const measurementTimeRef = useRef(0);
+  const simplifiedTimeRef = useRef(0);
+  const ionAnimationTimeRef = useRef(0);
+  const historyTimeRef = useRef(0);
   const currentHistoryRef = useRef([]);
   const voltageEventsRef = useRef([]);
   const ivPointsRef = useRef([]);
   const lastHistorySampleRef = useRef(0);
   const pausedRef = useRef(false);
+  const simplifiedModeRef = useRef(true);
+  const simplifiedCurrentTransitionRef = useRef(null);
+  if (simplifiedCurrentTransitionRef.current === null) {
+    simplifiedCurrentTransitionRef.current = {
+      from: 0,
+      to: simplifiedBaseCurrentTarget(DEFAULT_VOLTAGE),
+      start: 0,
+    };
+  }
+  const simplifiedCurrentNoiseRef = useRef(null);
+  if (simplifiedCurrentNoiseRef.current === null) {
+    simplifiedCurrentNoiseRef.current = {
+      from: 0,
+      to: nextSimplifiedNoiseTarget(DEFAULT_VOLTAGE),
+      start: 0,
+      nextSample: SIMPLIFIED_CURRENT_NOISE_SAMPLE_MS,
+    };
+  }
 
-  const [voltage, setVoltage] = useState(6);
+  const [voltage, setVoltage] = useState(DEFAULT_VOLTAGE);
   const [paused, setPaused] = useState(false);
-  const [showCircuitDiagram, setShowCircuitDiagram] = useState(false);
-  const [showDensityExplanation, setShowDensityExplanation] = useState(false);
+  const [simplifiedMode, setSimplifiedMode] = useState(true);
   const [showIVGraphExplanation, setShowIVGraphExplanation] = useState(false);
-  const [hideTerminalElectrons, setHideTerminalElectrons] = useState(false);
   const [ivGraphMinimised, setIvGraphMinimised] = useState(false);
   const [showTrendOverlay, setShowTrendOverlay] = useState(false);
   const [analogueMeterMinimised, setAnalogueMeterMinimised] = useState(false);
@@ -1991,7 +2134,6 @@ export default function App() {
   const ivGraphMinimisedRef = useRef(false);
   const showTrendOverlayRef = useRef(false);
   const currentHistoryMinimisedRef = useRef(false);
-  const hideTerminalElectronsRef = useRef(false);
   const [readout, setReadout] = useState({
     current: 0,
     resistance: null,
@@ -2010,23 +2152,17 @@ export default function App() {
   }, [paused]);
 
   useEffect(() => {
-    if (
-      !showCircuitDiagram &&
-      !showDensityExplanation &&
-      !showIVGraphExplanation
-    ) return undefined;
+    if (!showIVGraphExplanation) return undefined;
 
     const handleKeyDown = (event) => {
       if (event.key === "Escape") {
-        setShowCircuitDiagram(false);
-        setShowDensityExplanation(false);
         setShowIVGraphExplanation(false);
       }
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [showCircuitDiagram, showDensityExplanation, showIVGraphExplanation]);
+  }, [showIVGraphExplanation]);
 
   useEffect(() => {
     ivGraphMinimisedRef.current = ivGraphMinimised;
@@ -2041,14 +2177,12 @@ export default function App() {
   }, [currentHistoryMinimised]);
 
   useEffect(() => {
-    hideTerminalElectronsRef.current = hideTerminalElectrons;
-  }, [hideTerminalElectrons]);
-
-  useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return undefined;
+    const microscopicOverlay = microscopicOverlayRef.current;
+    if (!canvas || !microscopicOverlay) return undefined;
 
     const ctx = canvas.getContext("2d");
+    const microscopicOverlayCtx = microscopicOverlay.getContext("2d");
     ctx.setTransform(
       CANVAS_RENDER_SCALE,
       0,
@@ -2063,7 +2197,8 @@ export default function App() {
     if (electronsRef.current.length === 0) {
       electronsRef.current = makeInitialElectronPopulation(
         voltageRef.current,
-        ionsRef.current
+        ionsRef.current,
+        simplifiedModeRef.current
       );
     }
 
@@ -2079,13 +2214,63 @@ export default function App() {
 
       const electrons = electronsRef.current;
       const ions = ionsRef.current;
-      const targetCount = voltageToTargetCount(voltageRef.current);
+      const simplifiedMotion = simplifiedModeRef.current;
+      const targetCount = voltageToTargetCount(
+        voltageRef.current,
+        simplifiedMotion
+      );
+      const maxTotalElectrons = simplifiedMotion
+        ? SIMPLIFIED_MAX_TOTAL_ELECTRONS
+        : MAX_TOTAL_ELECTRONS;
+      let simplifiedCurrent = currentRef.current;
 
       if (!pausedRef.current) {
         measurementTimeRef.current += dt * 1000;
-        maintainReservoirPopulation(electrons, targetCount, voltageRef.current);
-        updateIons(ions, temperatureRef.current, now / 1000);
-        repelElectrons(electrons, dt);
+        simplifiedTimeRef.current += rawDt * 1000;
+        ionAnimationTimeRef.current += rawDt;
+        historyTimeRef.current += rawDt * 1000;
+        if (simplifiedModeRef.current) {
+          const baseCurrent = simplifiedCurrentDuringTransition(
+            simplifiedCurrentTransitionRef.current,
+            simplifiedTimeRef.current
+          );
+          let noiseTransition = simplifiedCurrentNoiseRef.current;
+          if (simplifiedTimeRef.current >= noiseTransition.nextSample) {
+            const currentNoise = simplifiedNoiseDuringTransition(
+              noiseTransition,
+              simplifiedTimeRef.current
+            );
+            noiseTransition = {
+              from: currentNoise,
+              to: nextSimplifiedNoiseTarget(voltageRef.current),
+              start: simplifiedTimeRef.current,
+              nextSample:
+                simplifiedTimeRef.current +
+                SIMPLIFIED_CURRENT_NOISE_SAMPLE_MS,
+            };
+            simplifiedCurrentNoiseRef.current = noiseTransition;
+          }
+          simplifiedCurrent =
+            baseCurrent +
+            simplifiedNoiseDuringTransition(
+              noiseTransition,
+              simplifiedTimeRef.current
+            );
+        }
+        maintainReservoirPopulation(
+          electrons,
+          targetCount,
+          voltageRef.current,
+          maxTotalElectrons
+        );
+        updateIons(
+          ions,
+          temperatureRef.current,
+          ionAnimationTimeRef.current
+        );
+        if (!simplifiedModeRef.current) {
+          repelElectrons(electrons, dt);
+        }
 
         let collisionHeat = 0;
         let frameCollisionCount = 0;
@@ -2095,12 +2280,37 @@ export default function App() {
         );
 
         for (const electron of electrons) {
+          if (
+            simplifiedModeRef.current &&
+            electron.nookHoldRemaining > 0
+          ) {
+            electron.nookHoldRemaining = Math.max(
+              0,
+              electron.nookHoldRemaining - rawDt
+            );
+            electron.oldX = electron.x;
+            electron.oldY = electron.y;
+            continue;
+          }
+
+          if (simplifiedModeRef.current) {
+            applySimplifiedElectronMotion(
+              electron,
+              dt,
+              voltageRef.current,
+              simplifiedCurrent
+            );
+            recordSimplifiedElectronTrail(electron, dt);
+          }
           moveElectron(electron, dt, voltageRef.current);
           const collisionResult = scatterFromIons(
             electron,
             ions,
             temperatureRef.current,
-            currentRef.current
+            simplifiedModeRef.current
+              ? simplifiedCurrent
+              : currentRef.current,
+            simplifiedModeRef.current
           );
           collisionHeat += collisionResult.depositedHeat;
           frameCollisionCount += collisionResult.collisions;
@@ -2145,7 +2355,18 @@ export default function App() {
           electronSeconds: conductorElectronCount * dt,
         });
 
-        temperatureRef.current += collisionHeat;
+        if (simplifiedModeRef.current) {
+          const equilibriumTemperature = simplifiedEquilibriumTemperature(
+            voltageRef.current,
+            simplifiedCurrent
+          );
+          temperatureRef.current +=
+            COOLING_RATE *
+            (equilibriumTemperature - AMBIENT_TEMP) *
+            dt;
+        } else {
+          temperatureRef.current += collisionHeat;
+        }
 
         // Exponential passive cooling to the fixed 20 C ambient temperature.
         const excess = temperatureRef.current - AMBIENT_TEMP;
@@ -2161,11 +2382,11 @@ export default function App() {
             ? electron.x < RIGHT_EXIT_X
             : electron.x > LEFT_EXIT_X
         );
-      } else {
-        updateIons(ions, temperatureRef.current, now / 1000);
       }
 
-      // Use a true 5-second rolling average of signed crossing rate. The
+      // Use a true 5-second rolling average of signed crossing rate. Electron
+      // flow is opposite to conventional current, so invert the signed electron
+      // crossings before displaying current. The
       // measurement clock advances only while the simulation is running, so
       // pausing also freezes the rolling-average window.
       const measurementNow = measurementTimeRef.current;
@@ -2177,8 +2398,11 @@ export default function App() {
         (sum, crossing) => sum + crossing.direction,
         0
       );
-      const current =
-        (netCrossings / (CURRENT_AVERAGE_WINDOW_MS / 1000)) * CURRENT_SCALE;
+      const measuredCurrent =
+        (-netCrossings / (CURRENT_AVERAGE_WINDOW_MS / 1000)) * CURRENT_SCALE;
+      const current = simplifiedModeRef.current
+        ? simplifiedCurrent
+        : measuredCurrent;
       currentRef.current = current;
       const currentMatchesPolarity =
         Math.abs(current) > 0.002 && voltageRef.current * current > 0;
@@ -2203,18 +2427,28 @@ export default function App() {
           ? diagnosticTotals.collisions / diagnosticTotals.electronSeconds
           : 0;
 
+      const historyNow = historyTimeRef.current;
       if (
         !pausedRef.current &&
-        now - lastHistorySampleRef.current >= AMMETER_HISTORY_SAMPLE_MS
+        historyNow - lastHistorySampleRef.current >= AMMETER_HISTORY_SAMPLE_MS
       ) {
-        lastHistorySampleRef.current = now;
-        currentHistoryRef.current.push({ time: now, current, resistance });
+        lastHistorySampleRef.current = historyNow;
+        currentHistoryRef.current.push({
+          time: historyNow,
+          current,
+          resistance,
+        });
       }
       currentHistoryRef.current = currentHistoryRef.current.filter(
-        (point) => now - point.time <= AMMETER_HISTORY_MS
+        (point) =>
+          historyNow - point.time <=
+          AMMETER_HISTORY_MS + AMMETER_HISTORY_EDGE_BUFFER_MS
       );
+      const latestHistoryPoint =
+        currentHistoryRef.current[currentHistoryRef.current.length - 1];
+      const displayedHistoryCurrent = latestHistoryPoint?.current ?? 0;
       voltageEventsRef.current = voltageEventsRef.current.filter(
-        (event) => now - event.time <= AMMETER_HISTORY_MS
+        (event) => historyNow - event.time <= AMMETER_HISTORY_MS
       );
 
       const reservoirCount = electronsRef.current.reduce(
@@ -2227,18 +2461,48 @@ export default function App() {
         electronsRef.current,
         ions,
         temperatureRef.current,
-        voltageRef.current,
         current,
-        resistance,
-        targetCount,
+        displayedHistoryCurrent,
         currentHistoryRef.current,
         voltageEventsRef.current,
         ivPointsRef.current,
-        now,
+        historyNow,
         ivGraphMinimisedRef.current,
         currentHistoryMinimisedRef.current,
-        hideTerminalElectronsRef.current,
         showTrendOverlayRef.current
+      );
+
+      // Repaint the microscopic panel on a foreground canvas. The zoom wedge
+      // can therefore continue beneath its left edge without tinting the
+      // lattice, particles, headings, or frame.
+      microscopicOverlayCtx.clearRect(
+        0,
+        0,
+        microscopicOverlay.width,
+        microscopicOverlay.height
+      );
+      const microscopicSourceX = Math.round(
+        MICROSCOPIC_FRAME_RENDER.x * CANVAS_RENDER_SCALE
+      );
+      const microscopicSourceY = Math.round(
+        MICROSCOPIC_FRAME_RENDER.y * CANVAS_RENDER_SCALE
+      );
+      const microscopicSourceWidth = Math.round(
+        MICROSCOPIC_FRAME_RENDER.width * CANVAS_RENDER_SCALE
+      );
+      const microscopicSourceHeight = Math.round(
+        MICROSCOPIC_FRAME_RENDER.height * CANVAS_RENDER_SCALE
+      );
+      microscopicOverlayCtx.drawImage(
+        canvas,
+        microscopicSourceX,
+        microscopicSourceY,
+        microscopicSourceWidth,
+        microscopicSourceHeight,
+        microscopicSourceX,
+        microscopicSourceY,
+        microscopicSourceWidth,
+        microscopicSourceHeight
       );
 
       if (now - lastUiUpdate > 120) {
@@ -2272,17 +2536,34 @@ export default function App() {
     ionsRef.current = makeIonLattice();
     electronsRef.current = makeInitialElectronPopulation(
       voltageRef.current,
-      ionsRef.current
+      ionsRef.current,
+      simplifiedModeRef.current
     );
     crossingsRef.current = [];
     collisionDiagnosticRef.current = [];
     measurementTimeRef.current = 0;
+    simplifiedTimeRef.current = 0;
+    ionAnimationTimeRef.current = 0;
+    historyTimeRef.current = 0;
     currentHistoryRef.current = [];
     voltageEventsRef.current = [];
     // Preserve captured I-V points when resetting the simulation.
     lastHistorySampleRef.current = 0;
     temperatureRef.current = AMBIENT_TEMP;
     currentRef.current = 0;
+    if (simplifiedModeRef.current) {
+      simplifiedCurrentTransitionRef.current = {
+        from: 0,
+        to: simplifiedBaseCurrentTarget(voltageRef.current),
+        start: 0,
+      };
+      simplifiedCurrentNoiseRef.current = {
+        from: 0,
+        to: nextSimplifiedNoiseTarget(voltageRef.current),
+        start: 0,
+        nextSample: SIMPLIFIED_CURRENT_NOISE_SAMPLE_MS,
+      };
+    }
 
     const reservoirCount = electronsRef.current.reduce(
       (count, electron) => count + (inSourceReservoir(electron, voltageRef.current) ? 1 : 0),
@@ -2299,23 +2580,59 @@ export default function App() {
     });
   };
 
+  const toggleSimplifiedMode = () => {
+    const nextSimplifiedMode = !simplifiedModeRef.current;
+    simplifiedModeRef.current = nextSimplifiedMode;
+    setSimplifiedMode(nextSimplifiedMode);
+
+    crossingsRef.current = [];
+    collisionDiagnosticRef.current = [];
+    electronsRef.current = makeInitialElectronPopulation(
+      voltageRef.current,
+      ionsRef.current,
+      nextSimplifiedMode
+    );
+
+    if (nextSimplifiedMode) {
+      simplifiedCurrentTransitionRef.current = {
+        from: currentRef.current,
+        to: simplifiedBaseCurrentTarget(voltageRef.current),
+        start: simplifiedTimeRef.current,
+      };
+      simplifiedCurrentNoiseRef.current = {
+        from: 0,
+        to: nextSimplifiedNoiseTarget(voltageRef.current),
+        start: simplifiedTimeRef.current,
+        nextSample:
+          simplifiedTimeRef.current + SIMPLIFIED_CURRENT_NOISE_SAMPLE_MS,
+      };
+    } else {
+      // Hand control back to the unchanged crossing-based current model.
+      currentRef.current = 0;
+    }
+  };
+
   const applyVoltage = (requestedVoltage) => {
     const nextVoltage = Math.max(
       -MAX_VOLTAGE,
       Math.min(MAX_VOLTAGE, Math.round(Number(requestedVoltage) * 2) / 2)
     );
-    const nextTarget = voltageToTargetCount(nextVoltage);
-    const now = performance.now();
+    const simplifiedMotion = simplifiedModeRef.current;
+    const nextTarget = voltageToTargetCount(nextVoltage, simplifiedMotion);
+    const maxTotalElectrons = simplifiedMotion
+      ? SIMPLIFIED_MAX_TOTAL_ELECTRONS
+      : MAX_TOTAL_ELECTRONS;
+    const historyNow = historyTimeRef.current;
     const previousDirection = flowDirection(voltageRef.current);
     const nextDirection = flowDirection(nextVoltage);
 
     const voltageEvents = voltageEventsRef.current;
     const lastEvent = voltageEvents[voltageEvents.length - 1];
-    if (lastEvent && now - lastEvent.time < 450) {
-      lastEvent.time = now;
+    if (lastEvent && historyNow - lastEvent.time < 450) {
+      lastEvent.time = historyNow;
       lastEvent.voltage = nextVoltage;
     } else {
-      voltageEvents.push({ time: now, voltage: nextVoltage });
+      voltageEvents.push({ time: historyNow, voltage: nextVoltage });
     }
 
     // When polarity reverses, the old reservoir becomes the sink. Clear both
@@ -2327,10 +2644,34 @@ export default function App() {
 
     voltageRef.current = nextVoltage;
     setVoltage(nextVoltage);
+    if (simplifiedModeRef.current) {
+      const transitionTime = simplifiedTimeRef.current;
+      const currentBase = simplifiedCurrentDuringTransition(
+        simplifiedCurrentTransitionRef.current,
+        transitionTime
+      );
+      const currentNoise = simplifiedNoiseDuringTransition(
+        simplifiedCurrentNoiseRef.current,
+        transitionTime
+      );
+      simplifiedCurrentTransitionRef.current = {
+        from: currentBase,
+        to: simplifiedBaseCurrentTarget(nextVoltage),
+        start: transitionTime,
+      };
+      simplifiedCurrentNoiseRef.current = {
+        from: currentNoise,
+        to: nextSimplifiedNoiseTarget(nextVoltage),
+        start: transitionTime,
+        nextSample:
+          transitionTime + SIMPLIFIED_CURRENT_NOISE_SAMPLE_MS,
+      };
+    }
     electronsRef.current = rebuildReservoirPopulation(
       electronsRef.current,
       nextTarget,
-      nextVoltage
+      nextVoltage,
+      maxTotalElectrons
     );
   };
 
@@ -2338,22 +2679,58 @@ export default function App() {
     applyVoltage(event.target.value);
   };
 
+  const setVoltageFromSliderPointer = (event) => {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const proportion = Math.max(
+      0,
+      Math.min(1, (event.clientX - bounds.left) / bounds.width)
+    );
+    applyVoltage(-MAX_VOLTAGE + proportion * MAX_VOLTAGE * 2);
+  };
+
+  const handleVoltagePointerDown = (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.currentTarget.focus();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setVoltageFromSliderPointer(event);
+  };
+
+  const handleVoltagePointerMove = (event) => {
+    if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+    setVoltageFromSliderPointer(event);
+  };
+
+  const handleVoltagePointerUp = (event) => {
+    if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+    setVoltageFromSliderPointer(event);
+    event.currentTarget.releasePointerCapture(event.pointerId);
+  };
+
+  const handleVoltagePointerCancel = (event) => {
+    if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+    event.currentTarget.releasePointerCapture(event.pointerId);
+  };
+
   const stepVoltage = (delta) => {
     applyVoltage(voltageRef.current + delta);
   };
 
   const captureDataPoint = () => {
-    const measurementNow = measurementTimeRef.current;
-    crossingsRef.current = crossingsRef.current.filter(
-      (crossing) =>
-        measurementNow - crossing.time <= CURRENT_AVERAGE_WINDOW_MS
-    );
-    const netCrossings = crossingsRef.current.reduce(
-      (sum, crossing) => sum + crossing.direction,
-      0
-    );
-    const current =
-      (netCrossings / (CURRENT_AVERAGE_WINDOW_MS / 1000)) * CURRENT_SCALE;
+    let current = currentRef.current;
+    if (!simplifiedModeRef.current) {
+      const measurementNow = measurementTimeRef.current;
+      crossingsRef.current = crossingsRef.current.filter(
+        (crossing) =>
+          measurementNow - crossing.time <= CURRENT_AVERAGE_WINDOW_MS
+      );
+      const netCrossings = crossingsRef.current.reduce(
+        (sum, crossing) => sum + crossing.direction,
+        0
+      );
+      current =
+        (-netCrossings / (CURRENT_AVERAGE_WINDOW_MS / 1000)) * CURRENT_SCALE;
+    }
 
     ivPointsRef.current.push({
       voltage: voltageRef.current,
@@ -2365,7 +2742,52 @@ export default function App() {
     ivPointsRef.current = [];
   };
 
-  const targetCount = voltageToTargetCount(voltage);
+  const bulbHeatLevel = bulbGlowHeatLevel(readout.temperature);
+  const bulbGlowStrength = Math.pow(bulbHeatLevel, 0.58);
+  const bulbColourHeatLevel = Math.pow(bulbHeatLevel, 0.72);
+  const bulbGlowGreen = Math.round(190 + 45 * bulbColourHeatLevel);
+  const bulbGlowBlue = Math.round(65 + 95 * bulbColourHeatLevel);
+  const bulbOuterGreen = Math.round(135 + 90 * bulbColourHeatLevel);
+  const bulbOuterBlue = Math.round(35 + 75 * bulbColourHeatLevel);
+  const bulbCoreGreen = Math.round(232 + 23 * bulbColourHeatLevel);
+  const bulbCoreBlue = Math.round(150 + 80 * bulbColourHeatLevel);
+  // Keep the filament itself visibly red-hot at moderate temperatures, then
+  // let it progress through orange to yellow-white as it approaches 1600 C.
+  const filamentCoreGreen = Math.round(
+    45 + 200 * Math.pow(bulbHeatLevel, 1.15)
+  );
+  const filamentCoreBlue = Math.round(
+    15 + 175 * Math.pow(bulbHeatLevel, 1.4)
+  );
+  const filamentAuraGreen = Math.round(
+    20 + 155 * Math.pow(bulbHeatLevel, 1.1)
+  );
+  const filamentAuraBlue = Math.round(
+    5 + 90 * Math.pow(bulbHeatLevel, 1.4)
+  );
+  const activeCircuitDiagram =
+    voltage < 0 ? negativeCircuitDiagram : positiveCircuitDiagram;
+  const hasTerminalPolarity = Math.abs(voltage) > 0.001;
+  const leftTerminalPolarity = hasTerminalPolarity
+    ? voltage > 0
+      ? "positive"
+      : "negative"
+    : "neutral";
+  const rightTerminalPolarity = hasTerminalPolarity
+    ? voltage > 0
+      ? "negative"
+      : "positive"
+    : "neutral";
+  const electronFlowDirection = hasTerminalPolarity
+    ? flowDirection(voltage) > 0
+      ? "right"
+      : "left"
+    : "none";
+  const currentFlowDirection = hasTerminalPolarity
+    ? electronFlowDirection === "right"
+      ? "left"
+      : "right"
+    : "none";
 
   return (
     <div className="fs-page">
@@ -2376,13 +2798,18 @@ export default function App() {
           <h1>Filament conduction simulation</h1>
 
           <div className="fs-header-actions">
-            <button
-              type="button"
-              className="fs-circuit-diagram-button"
-              onClick={() => setShowDensityExplanation(true)}
-            >
-              Why electron density?
-            </button>
+            <label className="fs-simplified-mode-toggle">
+              <input
+                type="checkbox"
+                checked={simplifiedMode}
+                onChange={toggleSimplifiedMode}
+                aria-label="Simplified electron motion"
+              />
+              <span className="fs-simplified-mode-track" aria-hidden="true">
+                <span className="fs-simplified-mode-thumb" />
+              </span>
+              <span>Simplified electron motion</span>
+            </label>
 
             <button
               type="button"
@@ -2392,13 +2819,6 @@ export default function App() {
               I-V graph explanation
             </button>
 
-            <button
-              type="button"
-              className="fs-circuit-diagram-button"
-              onClick={() => setShowCircuitDiagram(true)}
-            >
-              Show circuit diagram
-            </button>
           </div>
         </header>
 
@@ -2422,7 +2842,22 @@ export default function App() {
                   −
                 </button>
 
-                <div className="fs-slider-wrap">
+                <div
+                  className="fs-slider-wrap"
+                  style={{
+                    "--slider-active-start": `${Math.min(
+                      50,
+                      ((voltage + MAX_VOLTAGE) / (MAX_VOLTAGE * 2)) * 100
+                    )}%`,
+                    "--slider-active-end": `${Math.max(
+                      50,
+                      ((voltage + MAX_VOLTAGE) / (MAX_VOLTAGE * 2)) * 100
+                    )}%`,
+                    "--slider-thumb-position": `${
+                      ((voltage + MAX_VOLTAGE) / (MAX_VOLTAGE * 2)) * 100
+                    }%`,
+                  }}
+                >
                   <input
                     className="fs-slider"
                     type="range"
@@ -2431,7 +2866,13 @@ export default function App() {
                     step="0.5"
                     value={voltage}
                     onChange={handleVoltageChange}
+                    onPointerDown={handleVoltagePointerDown}
+                    onPointerMove={handleVoltagePointerMove}
+                    onPointerUp={handleVoltagePointerUp}
+                    onPointerCancel={handleVoltagePointerCancel}
+                    aria-label="Potential difference"
                   />
+                  <span className="fs-slider-thumb" aria-hidden="true" />
                   <span className="fs-slider-zero-tick" aria-hidden="true" />
                   <span className="fs-slider-zero-label" aria-hidden="true">
                     0 V
@@ -2453,7 +2894,7 @@ export default function App() {
             </div>
 
             <div className="fs-control-side">
-              <div className="fs-actions fs-actions-top">
+              <div className="fs-actions">
                 <button
                   onClick={captureDataPoint}
                   style={{
@@ -2479,22 +2920,6 @@ export default function App() {
                 >
                   {paused ? "Resume" : "Pause"}
                 </button>
-              </div>
-
-              <div className="fs-actions fs-actions-bottom">
-                <button
-                  type="button"
-                  className={`fs-terminal-electron-toggle${
-                    hideTerminalElectrons ? " is-active" : ""
-                  }`}
-                  onClick={() =>
-                    setHideTerminalElectrons((value) => !value)
-                  }
-                >
-                  {hideTerminalElectrons
-                    ? "Show terminal electrons"
-                    : "Hide terminal electrons"}
-                </button>
                 <button
                   className="fs-refresh-electrons-button"
                   onClick={resetSimulation}
@@ -2513,6 +2938,160 @@ export default function App() {
               height={HEIGHT * CANVAS_RENDER_SCALE}
               className="fs-stage"
             />
+
+            <canvas
+              ref={microscopicOverlayRef}
+              width={WIDTH * CANVAS_RENDER_SCALE}
+              height={HEIGHT * CANVAS_RENDER_SCALE}
+              className="fs-microscopic-overlay"
+              aria-hidden="true"
+            />
+
+            <img
+              src={activeCircuitDiagram}
+              alt={`Series circuit with a ${voltage < 0 ? "negative" : "positive"} potential difference and ammeter`}
+              className="fs-circuit-context-image"
+            />
+
+            <div
+              className="fs-circuit-bulb"
+              style={{
+                "--bulb-glow-green": bulbGlowGreen,
+                "--bulb-glow-blue": bulbGlowBlue,
+                "--bulb-outer-green": bulbOuterGreen,
+                "--bulb-outer-blue": bulbOuterBlue,
+                "--bulb-core-green": bulbCoreGreen,
+                "--bulb-core-blue": bulbCoreBlue,
+                "--filament-core-green": filamentCoreGreen,
+                "--filament-core-blue": filamentCoreBlue,
+                "--filament-aura-green": filamentAuraGreen,
+                "--filament-aura-blue": filamentAuraBlue,
+              }}
+            >
+              <span
+                className="fs-circuit-bulb-glow"
+                style={{
+                  opacity: Math.min(1, bulbGlowStrength * 1.1),
+                  transform: `scale(${0.76 + bulbGlowStrength * 0.9})`,
+                }}
+                aria-hidden="true"
+              />
+              <img
+                src={uprightBulb}
+                alt="Upright filament bulb connected into the series circuit"
+                className="fs-circuit-bulb-image"
+                style={{
+                  filter:
+                    bulbGlowStrength > 0
+                      ? `brightness(${1 + bulbGlowStrength * 0.55}) saturate(${1 + bulbGlowStrength * 0.85}) drop-shadow(0 0 ${2 + bulbGlowStrength * 26}px rgba(255, ${bulbGlowGreen}, ${bulbGlowBlue}, ${bulbGlowStrength * 0.9}))`
+                      : "none",
+                }}
+              />
+              <svg
+                className="fs-circuit-bulb-filament-glow"
+                viewBox="0 0 80 108"
+                aria-hidden="true"
+                style={{
+                  opacity: bulbGlowStrength,
+                  filter: `drop-shadow(0 0 ${2 + bulbGlowStrength * 15}px rgba(255, ${filamentAuraGreen}, ${filamentAuraBlue}, ${bulbGlowStrength}))`,
+                }}
+              >
+                <path
+                  className="fs-filament-aura"
+                  d="M 22 45 L 26 40 L 30 50 L 34 40 L 38 50 L 42 40 L 46 50 L 50 40 L 54 50 L 58 45"
+                />
+                <path
+                  className="fs-filament-core"
+                  d="M 22 45 L 26 40 L 30 50 L 34 40 L 38 50 L 42 40 L 46 50 L 50 40 L 54 50 L 58 45"
+                />
+              </svg>
+            </div>
+
+            <div
+              className={`fs-flow-directions${hasTerminalPolarity ? "" : " is-stopped"}`}
+              style={{
+                left: `${(MICROSCOPIC_FRAME_RENDER.x / WIDTH) * 100}%`,
+                top: `${((MICROSCOPIC_FRAME_RENDER.y + MICROSCOPIC_FRAME_RENDER.height + 4) / HEIGHT) * 100}%`,
+                width: `${(MICROSCOPIC_FRAME_RENDER.width / WIDTH) * 100}%`,
+              }}
+              aria-label={
+                hasTerminalPolarity
+                  ? `Through the filament, current flows ${currentFlowDirection} and electrons flow ${electronFlowDirection}`
+                  : "At zero volts, there is no net current or electron flow through the filament"
+              }
+            >
+              <div className="fs-flow-heading">FLOW THROUGH FILAMENT</div>
+              <div className="fs-flow-row fs-current-flow">
+                <span>Current flow</span>
+                {hasTerminalPolarity ? (
+                  <svg
+                    className={`fs-flow-arrow is-${currentFlowDirection}`}
+                    viewBox="0 0 104 14"
+                    aria-hidden="true"
+                  >
+                    <path d="M 4 7 H 98" />
+                    <path d="M 90 1.5 L 98 7 L 90 12.5" />
+                  </svg>
+                ) : (
+                  <span className="fs-no-flow">No net flow</span>
+                )}
+              </div>
+              <div className="fs-flow-row fs-electron-flow">
+                <span>Electron flow</span>
+                {hasTerminalPolarity ? (
+                  <svg
+                    className={`fs-flow-arrow is-${electronFlowDirection}`}
+                    viewBox="0 0 104 14"
+                    aria-hidden="true"
+                  >
+                    <path d="M 4 7 H 98" />
+                    <path d="M 90 1.5 L 98 7 L 90 12.5" />
+                  </svg>
+                ) : (
+                  <span className="fs-no-flow">No net flow</span>
+                )}
+              </div>
+            </div>
+
+            <div
+              className="fs-terminal-directions"
+              aria-label={
+                hasTerminalPolarity
+                  ? `The ${leftTerminalPolarity} terminal is to the left and the ${rightTerminalPolarity} terminal is to the right`
+                  : "At zero volts, neither terminal has polarity"
+              }
+              style={{
+                left: `${(MICROSCOPIC_FRAME_RENDER.x / WIDTH) * 100}%`,
+                top: `${(IV_PANEL_Y / HEIGHT) * 100}%`,
+                width: `${(MICROSCOPIC_FRAME_RENDER.width / WIDTH) * 100}%`,
+              }}
+            >
+              <span className={`is-${leftTerminalPolarity}`}>
+                ← {hasTerminalPolarity ? `${leftTerminalPolarity} terminal` : "terminal"}
+              </span>
+              <span className={`is-${rightTerminalPolarity}`}>
+                {hasTerminalPolarity ? `${rightTerminalPolarity} terminal` : "terminal"} →
+              </span>
+            </div>
+
+            <svg
+              className="fs-zoom-leaders"
+              viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
+              preserveAspectRatio="none"
+              aria-hidden="true"
+            >
+              <path
+                className="fs-zoom-wedge"
+                d={`M ${ZOOM_SOURCE.x} ${ZOOM_SOURCE.y} L ${MICROSCOPIC_FRAME_RENDER.x + ZOOM_TARGET_OVERLAP} ${MICROSCOPIC_FRAME_RENDER.y + ZOOM_TARGET_TOP_INSET} L ${MICROSCOPIC_FRAME_RENDER.x + ZOOM_TARGET_OVERLAP} ${MICROSCOPIC_FRAME_RENDER.y + MICROSCOPIC_FRAME_RENDER.height - ZOOM_TARGET_BOTTOM_INSET} Z`}
+              />
+              <path
+                d={`M ${ZOOM_SOURCE.x} ${ZOOM_SOURCE.y} L ${MICROSCOPIC_FRAME_RENDER.x + ZOOM_TARGET_OVERLAP} ${MICROSCOPIC_FRAME_RENDER.y + ZOOM_TARGET_TOP_INSET}`}
+              />
+              <path
+                d={`M ${ZOOM_SOURCE.x} ${ZOOM_SOURCE.y} L ${MICROSCOPIC_FRAME_RENDER.x + ZOOM_TARGET_OVERLAP} ${MICROSCOPIC_FRAME_RENDER.y + MICROSCOPIC_FRAME_RENDER.height - ZOOM_TARGET_BOTTOM_INSET}`}
+              />
+              <circle cx={ZOOM_SOURCE.x} cy={ZOOM_SOURCE.y} r="10" />
+            </svg>
 
             <button
               type="button"
@@ -2573,7 +3152,7 @@ export default function App() {
               <div className="fs-stage-readouts">
                 <ReadoutCard
                   label="Digital ammeter"
-                  value={`${readout.current.toFixed(1)} A`}
+                  value={`${readout.current.toFixed(simplifiedMode ? 2 : 1)} A`}
                   detail="5 s rolling average"
                   minimised={digitalCurrentMinimised}
                   onToggleMinimise={() =>
@@ -2607,57 +3186,6 @@ export default function App() {
         </section>
 
       </main>
-
-      {showDensityExplanation && (
-        <div
-          className="fs-circuit-modal-backdrop"
-          role="presentation"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) {
-              setShowDensityExplanation(false);
-            }
-          }}
-        >
-          <div
-            className="fs-circuit-modal fs-density-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="fs-density-modal-title"
-          >
-            <div className="fs-circuit-modal-header">
-              <h2 id="fs-density-modal-title">Why use electron density?</h2>
-              <button
-                type="button"
-                className="fs-circuit-modal-close"
-                onClick={() => setShowDensityExplanation(false)}
-                aria-label="Close electron density explanation"
-                title="Close"
-              >
-                ×
-              </button>
-            </div>
-
-            <div className="fs-density-modal-body">
-              <p>
-                Potential difference is an invisible driving effect, so this
-                simulation needs a simple way to make it visible.
-              </p>
-              <p>
-                A higher potential difference is shown using more electrons in
-                the source terminal. Fewer electrons represent a smaller
-                potential difference. Reversing the potential difference swaps
-                which terminal acts as the source.
-              </p>
-              <p>
-                This is a visual model rather than a literal picture of what
-                happens inside a real power supply. It is used here to make it
-                easier to see how changing potential difference affects the
-                movement of electrons and therefore the current.
-              </p>
-            </div>
-          </div>
-        </div>
-      )}
 
       {showIVGraphExplanation && (
         <div
@@ -2759,45 +3287,6 @@ export default function App() {
         </div>
       )}
 
-      {showCircuitDiagram && (
-        <div
-          className="fs-circuit-modal-backdrop"
-          role="presentation"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) {
-              setShowCircuitDiagram(false);
-            }
-          }}
-        >
-          <div
-            className="fs-circuit-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="fs-circuit-modal-title"
-          >
-            <div className="fs-circuit-modal-header">
-              <h2 id="fs-circuit-modal-title">Circuit diagram</h2>
-              <button
-                type="button"
-                className="fs-circuit-modal-close"
-                onClick={() => setShowCircuitDiagram(false)}
-                aria-label="Close circuit diagram"
-                title="Close circuit diagram"
-              >
-                ×
-              </button>
-            </div>
-
-            <div className="fs-circuit-modal-body">
-              <img
-                src={circuitDiagram}
-                alt="Circuit diagram"
-                className="fs-circuit-diagram-image"
-              />
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -3318,6 +3807,69 @@ const layoutCss = `
     flex: 0 0 auto;
   }
 
+  .fs-simplified-mode-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 30px;
+    padding: 4px 8px 4px 6px;
+    border: 1px solid #aebdca;
+    border-radius: 9px;
+    background: rgba(244, 249, 253, 0.94);
+    color: #29445a;
+    font-size: clamp(9px, 0.68vw, 11px);
+    font-weight: 750;
+    line-height: 1;
+    white-space: nowrap;
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .fs-simplified-mode-toggle input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .fs-simplified-mode-track {
+    position: relative;
+    flex: 0 0 auto;
+    width: 30px;
+    height: 17px;
+    border: 1px solid #8c9aa6;
+    border-radius: 999px;
+    background: #cbd4dc;
+    transition: background 140ms ease, border-color 140ms ease;
+  }
+
+  .fs-simplified-mode-thumb {
+    position: absolute;
+    left: 2px;
+    top: 2px;
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    background: #ffffff;
+    box-shadow: 0 1px 3px rgba(31, 50, 65, 0.3);
+    transition: transform 140ms ease;
+  }
+
+  .fs-simplified-mode-toggle input:checked + .fs-simplified-mode-track {
+    border-color: #3e82b9;
+    background: #579dd3;
+  }
+
+  .fs-simplified-mode-toggle input:checked + .fs-simplified-mode-track .fs-simplified-mode-thumb {
+    transform: translateX(13px);
+  }
+
+  .fs-simplified-mode-toggle input:focus-visible + .fs-simplified-mode-track {
+    outline: 3px solid rgba(77, 143, 200, 0.26);
+    outline-offset: 2px;
+  }
+
   .fs-circuit-diagram-button {
     flex: 0 0 auto;
     border: 1px solid #9aa9b5;
@@ -3623,84 +4175,179 @@ const layoutCss = `
   .fs-stage-controls {
     position: absolute;
     z-index: 4;
-    left: 3.75%;
-    top: 3.1%;
-    width: calc(50% - 6px);
+    left: 1.875%;
+    top: ${(IV_PANEL_Y / HEIGHT) * 100}%;
+    width: calc(26.25% + 10px);
+    height: 82px;
     box-sizing: border-box;
-    padding: clamp(3px, 0.3vw, 4.5px) clamp(5px, 0.45vw, 7px) clamp(5px, 0.42vw, 6.5px);
+    padding: 6px 8px;
     display: grid;
-    grid-template-columns: 240px minmax(0, 1fr);
-    gap: clamp(6px, 0.65vw, 10px);
-    align-items: center;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto;
+    gap: 5px;
+    align-content: center;
     border: 1px solid rgba(203, 213, 223, 0.92);
-    border-radius: 12px;
+    border-radius: 10px;
     background: rgba(248, 250, 252, 0.94);
     backdrop-filter: blur(3px);
-    box-shadow: 0 4px 14px rgba(31, 41, 51, 0.07);
+    box-shadow: 0 3px 10px rgba(31, 41, 51, 0.065);
   }
 
   .fs-stage-controls .fs-voltage-control {
-    transform: translateY(3px);
+    display: grid;
+    grid-template-columns: 145px 120px;
+    align-items: center;
+    gap: 8px;
+    transform: none;
   }
 
   .fs-stage-controls .fs-voltage-heading {
-    width: 240px;
-    justify-content: center;
-    gap: 7px;
-    font-size: clamp(10px, 0.82vw, 13px);
+    width: 145px;
+    justify-content: flex-start;
+    gap: 3px;
+    font-size: clamp(8px, 0.65vw, 10px);
+    white-space: nowrap;
   }
 
   .fs-stage-controls .fs-voltage-value {
-    padding: 0 5px;
+    width: 48px;
+    padding: 1px 4px;
     border: 1px solid #9fc5ed;
-    border-radius: 5px;
+    border-radius: 4px;
     background: #eaf4ff;
     color: #174f7a;
-    font-size: clamp(11px, 0.9vw, 14px);
+    font-size: clamp(10px, 0.78vw, 12px);
     font-variant-numeric: tabular-nums;
+    text-align: center;
   }
 
   .fs-stage-controls .fs-slider-wrap {
-    width: 72%;
-    min-width: 145px;
-    margin-top: 2px;
-    padding-bottom: 20px;
+    width: 64px;
+    min-width: 64px;
+    max-width: 64px;
+    margin-top: 0;
+    padding-bottom: 18px;
   }
 
   .fs-stage-controls .fs-voltage-stepper {
-    grid-template-columns: 25px 180px 25px;
-    width: max-content;
-    margin-top: 7px;
-    gap: 5px;
+    grid-template-columns: 20px 64px 20px;
+    width: 120px;
+    margin-top: 0;
+    gap: 8px;
   }
 
   .fs-stage-controls .fs-voltage-stepper .fs-slider-wrap {
-    width: 180px;
-    min-width: 180px;
-    max-width: 180px;
+    width: 64px;
+    min-width: 64px;
+    max-width: 64px;
+  }
+
+  .fs-stage-controls .fs-slider-wrap::before {
+    content: "";
+    position: absolute;
+    z-index: 0;
+    left: 0;
+    right: 0;
+    top: 6px;
+    height: 6px;
+    border: 1px solid rgba(82, 103, 120, 0.34);
+    border-radius: 999px;
+    background: linear-gradient(
+      to right,
+      #d4dde5 0%,
+      #d4dde5 var(--slider-active-start),
+      #6ea8dc var(--slider-active-start),
+      #6ea8dc var(--slider-active-end),
+      #d4dde5 var(--slider-active-end),
+      #d4dde5 100%
+    );
+  }
+
+  .fs-stage-controls .fs-slider-thumb {
+    position: absolute;
+    z-index: 1;
+    left: var(--slider-thumb-position);
+    top: 1.5px;
+    width: 15px;
+    height: 15px;
+    transform: translateX(-50%);
+    border: 2px solid #4d8fc8;
+    border-radius: 50%;
+    background: #fafdff;
+    box-shadow: 0 1px 3px rgba(31, 50, 65, 0.26);
+    pointer-events: none;
   }
 
   .fs-stage-controls .fs-slider {
-    width: 180px;
-    min-width: 180px;
-    max-width: 180px;
+    -webkit-appearance: none;
+    appearance: none;
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+    height: 32px;
+    margin: -6px 0 -8px;
+    border-radius: 999px;
+    background: transparent;
+    cursor: pointer;
+    touch-action: none;
+  }
+
+  .fs-stage-controls .fs-slider::-webkit-slider-runnable-track {
+    height: 6px;
+    border: 0;
+    border-radius: 999px;
+    background: transparent;
+  }
+
+  .fs-stage-controls .fs-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 28px;
+    height: 28px;
+    margin-top: -11px;
+    border: 0;
+    background: transparent;
+    opacity: 0;
+  }
+
+  .fs-stage-controls .fs-slider::-moz-range-track {
+    height: 6px;
+    border: 0;
+    border-radius: 999px;
+    background: transparent;
+  }
+
+  .fs-stage-controls .fs-slider::-moz-range-thumb {
+    width: 28px;
+    height: 28px;
+    border: 0;
+    background: transparent;
+    opacity: 0;
+  }
+
+  .fs-stage-controls .fs-slider:focus-visible {
+    outline: 3px solid rgba(77, 143, 200, 0.24);
+    outline-offset: 2px;
   }
 
   .fs-stage-controls .fs-voltage-step-button {
-    width: 25px;
-    height: 25px;
-    font-size: 15px;
-    transform: translateY(-4px);
+    width: 20px;
+    height: 20px;
+    font-size: 13px;
+    transform: none;
   }
 
   .fs-stage-controls .fs-slider-zero-tick {
-    top: 12px;
+    top: 15px;
+    width: 1px;
     height: 4px;
+    background: #607484;
   }
 
   .fs-stage-controls .fs-slider-zero-label {
-    top: 10px;
-    font-size: 8px;
+    top: 19px;
+    font-size: 7px;
+    line-height: 1;
   }
 
   .fs-stage-controls .fs-control-detail {
@@ -3710,61 +4357,27 @@ const layoutCss = `
 
   .fs-stage-controls .fs-actions {
     display: grid;
+    grid-template-columns: 85px 48px 42px minmax(76px, 1fr);
     align-items: center;
     justify-content: stretch;
     gap: 4px;
     min-width: 0;
   }
 
-  .fs-stage-controls .fs-actions-top {
-    grid-template-columns: 100px 68px 60px;
-    justify-content: end;
-  }
-
-  .fs-stage-controls .fs-actions-bottom {
-    grid-template-columns: 122px 110px;
-    justify-content: end;
-  }
-
   .fs-stage-controls .fs-actions button {
     width: 100%;
-    min-height: 28px !important;
+    min-height: 24px !important;
     white-space: nowrap;
-    padding: 4px 8px !important;
-    font-size: clamp(9px, 0.65vw, 10.5px) !important;
-    border-radius: 8px !important;
+    padding: 3px 5px !important;
+    font-size: clamp(8px, 0.61vw, 9.5px) !important;
+    border-radius: 6px !important;
   }
 
   .fs-stage-controls .fs-control-side {
-    display: grid;
-    grid-template-rows: auto auto;
-    row-gap: 4px;
-    align-content: center;
-    justify-items: stretch;
-    width: 236px;
-    min-width: 0;
-    justify-self: end;
-  }
-
-  .fs-stage-controls .fs-terminal-electron-toggle {
+    display: block;
     width: 100%;
-    min-height: 28px;
-    padding: 4px 8px;
-    border: 1px solid #b77a52;
-    border-radius: 7px;
-    background: #fff8f2;
-    color: #704328;
-    font-size: clamp(8px, 0.62vw, 10px);
-    font-weight: 750;
-    line-height: 1.1;
-    white-space: nowrap;
-    cursor: pointer;
-  }
-
-  .fs-stage-controls .fs-terminal-electron-toggle.is-active {
-    border-color: #99552f;
-    background: #c57943;
-    color: #ffffff;
+    min-width: 0;
+    justify-self: stretch;
   }
 
   .fs-stage-controls .fs-control-side .fs-control-detail {
@@ -3787,6 +4400,238 @@ const layoutCss = `
     width: 100%;
     height: auto;
     aspect-ratio: ${WIDTH} / ${HEIGHT};
+  }
+
+  .fs-microscopic-overlay {
+    position: absolute;
+    z-index: 2;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: auto;
+    aspect-ratio: ${WIDTH} / ${HEIGHT};
+    pointer-events: none;
+  }
+
+  .fs-circuit-context-image {
+    position: absolute;
+    z-index: 2;
+    left: calc(4.0625% + ${(MACRO_VIEW_OFFSET_X / WIDTH) * 100}%);
+    top: calc(37.24% + ${(MACRO_VIEW_OFFSET_Y / HEIGHT) * 100}% + 5px);
+    width: 22.5%;
+    height: auto;
+    pointer-events: none;
+    user-select: none;
+  }
+
+  .fs-circuit-bulb {
+    position: absolute;
+    z-index: 3;
+    left: calc(11.5625% + ${(MACRO_VIEW_OFFSET_X / WIDTH) * 100}%);
+    top: calc(24.07% + ${(MACRO_VIEW_OFFSET_Y / HEIGHT) * 100}%);
+    width: 9.375%;
+    height: auto;
+    pointer-events: none;
+    user-select: none;
+  }
+
+  .fs-circuit-bulb-glow {
+    position: absolute;
+    z-index: 0;
+    inset: -34% -64% -2%;
+    border-radius: 50%;
+    background: radial-gradient(
+      circle at 50% 48%,
+      rgba(255, var(--bulb-core-green), var(--bulb-core-blue), 1) 0%,
+      rgba(255, var(--bulb-glow-green), var(--bulb-glow-blue), 0.92) 24%,
+      rgba(255, var(--bulb-outer-green), var(--bulb-outer-blue), 0.55) 51%,
+      rgba(255, var(--bulb-outer-green), var(--bulb-outer-blue), 0.2) 72%,
+      rgba(255, var(--bulb-outer-green), var(--bulb-outer-blue), 0) 100%
+    );
+    filter: blur(14px);
+    transform-origin: 50% 48%;
+    transition: opacity 120ms linear, transform 120ms linear;
+  }
+
+  .fs-circuit-bulb-glow::after {
+    content: "";
+    position: absolute;
+    inset: 24% 31% 35%;
+    border-radius: 50%;
+    background: rgba(255, var(--bulb-core-green), var(--bulb-core-blue), 0.98);
+    filter: blur(7px);
+  }
+
+  .fs-circuit-bulb-image {
+    position: relative;
+    z-index: 1;
+    display: block;
+    width: 100%;
+    height: auto;
+    transition: filter 120ms linear;
+  }
+
+  .fs-circuit-bulb-filament-glow {
+    position: absolute;
+    z-index: 2;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+    transition: opacity 120ms linear, filter 120ms linear;
+  }
+
+  .fs-circuit-bulb-filament-glow path {
+    fill: none;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    vector-effect: non-scaling-stroke;
+  }
+
+  .fs-circuit-bulb-filament-glow .fs-filament-aura {
+    stroke: rgba(255, var(--filament-aura-green), var(--filament-aura-blue), 0.88);
+    stroke-width: 8;
+  }
+
+  .fs-circuit-bulb-filament-glow .fs-filament-core {
+    stroke: rgb(255, var(--filament-core-green), var(--filament-core-blue));
+    stroke-width: 3.1;
+  }
+
+  .fs-flow-directions {
+    position: absolute;
+    z-index: 4;
+    box-sizing: border-box;
+    padding: 5px 7px 6px;
+    border: 1px solid rgba(165, 181, 194, 0.8);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.92);
+    box-shadow: 0 4px 12px rgba(31, 50, 65, 0.08);
+    pointer-events: none;
+  }
+
+  .fs-flow-heading {
+    margin-bottom: 3px;
+    color: #536675;
+    font: 800 7px/1 system-ui, sans-serif;
+    letter-spacing: 0.08em;
+    text-align: center;
+  }
+
+  .fs-flow-row {
+    display: grid;
+    grid-template-columns: 74px minmax(0, 1fr);
+    align-items: center;
+    gap: 7px;
+    min-height: 15px;
+    font: 750 9px/1 system-ui, sans-serif;
+  }
+
+  .fs-flow-row + .fs-flow-row {
+    margin-top: 1px;
+  }
+
+  .fs-current-flow {
+    color: #a7195b;
+  }
+
+  .fs-electron-flow {
+    color: #1679a8;
+  }
+
+  .fs-flow-arrow {
+    display: block;
+    width: 100%;
+    height: 14px;
+    overflow: visible;
+    transform-origin: center;
+  }
+
+  .fs-flow-arrow.is-left {
+    transform: scaleX(-1);
+  }
+
+  .fs-flow-arrow path {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    vector-effect: non-scaling-stroke;
+  }
+
+  .fs-no-flow {
+    color: #758692;
+    font-size: 8px;
+    font-weight: 700;
+    text-align: center;
+  }
+
+  .fs-flow-directions.is-stopped .fs-flow-row {
+    color: #758692;
+  }
+
+  .fs-terminal-directions {
+    position: absolute;
+    z-index: 4;
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    min-height: 22px;
+    padding: 4px 7px;
+    border: 1px solid rgba(164, 179, 191, 0.72);
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.92);
+    box-shadow: 0 3px 9px rgba(31, 50, 65, 0.08);
+    color: #52636f;
+    font: 750 8px/1 system-ui, sans-serif;
+    letter-spacing: 0.01em;
+    pointer-events: none;
+    white-space: nowrap;
+  }
+
+  .fs-terminal-directions .is-positive {
+    color: #9f1657;
+  }
+
+  .fs-terminal-directions .is-negative {
+    color: #274c69;
+  }
+
+  .fs-terminal-directions .is-neutral {
+    color: #64747f;
+  }
+
+  .fs-zoom-leaders {
+    position: absolute;
+    z-index: 1;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+  }
+
+  .fs-zoom-leaders path {
+    fill: none;
+    stroke: #a7195b;
+    stroke-width: 2;
+    vector-effect: non-scaling-stroke;
+  }
+
+  .fs-zoom-leaders .fs-zoom-wedge {
+    fill: rgba(185, 48, 72, 0.075);
+    stroke: none;
+  }
+
+  .fs-zoom-leaders circle {
+    fill: rgba(167, 25, 91, 0.12);
+    stroke: #a7195b;
+    stroke-width: 2;
+    vector-effect: non-scaling-stroke;
   }
 
   .fs-trend-overlay-toggle {
@@ -4057,6 +4902,7 @@ const layoutCss = `
     .fs-stage-controls {
       position: static;
       width: auto;
+      height: auto;
       margin: 10px;
       padding: 10px 12px;
       grid-template-columns: 1fr;
@@ -4076,16 +4922,8 @@ const layoutCss = `
       min-width: 0;
     }
 
-    .fs-stage-controls .fs-actions-top {
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-    }
-
-    .fs-stage-controls .fs-actions-bottom {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-
     .fs-stage-controls .fs-control-side {
-      justify-items: start;
+      width: 100%;
     }
 
     .fs-stage-controls .fs-control-side .fs-control-detail {
@@ -4123,12 +4961,5 @@ const layoutCss = `
       padding-inline: 6px !important;
     }
 
-    .fs-stage-controls .fs-actions-top {
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-    }
-
-    .fs-stage-controls .fs-actions-bottom {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
   }
 `;
