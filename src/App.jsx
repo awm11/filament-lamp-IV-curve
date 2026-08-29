@@ -42,6 +42,7 @@ const instrumentPanelTop = (ivGraphMinimised, currentHistoryMinimised) =>
 
 const AMBIENT_TEMP = 20;
 const DEFAULT_VOLTAGE = 2;
+const SHOW_REFRESH_ELECTRONS_CONTROL = false;
 const BULB_GLOW_START_TEMP = 400;
 const BULB_GLOW_FULL_TEMP = 1600;
 const MAX_VOLTAGE = 12;
@@ -2123,6 +2124,8 @@ export default function App() {
   const [voltage, setVoltage] = useState(DEFAULT_VOLTAGE);
   const [paused, setPaused] = useState(false);
   const [simplifiedMode, setSimplifiedMode] = useState(true);
+  const [showMotionModeExplanation, setShowMotionModeExplanation] =
+    useState(false);
   const [showIVGraphExplanation, setShowIVGraphExplanation] = useState(false);
   const [ivGraphMinimised, setIvGraphMinimised] = useState(false);
   const [showTrendOverlay, setShowTrendOverlay] = useState(false);
@@ -2152,17 +2155,20 @@ export default function App() {
   }, [paused]);
 
   useEffect(() => {
-    if (!showIVGraphExplanation) return undefined;
+    if (!showMotionModeExplanation && !showIVGraphExplanation) {
+      return undefined;
+    }
 
     const handleKeyDown = (event) => {
       if (event.key === "Escape") {
+        setShowMotionModeExplanation(false);
         setShowIVGraphExplanation(false);
       }
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [showIVGraphExplanation]);
+  }, [showMotionModeExplanation, showIVGraphExplanation]);
 
   useEffect(() => {
     ivGraphMinimisedRef.current = ivGraphMinimised;
@@ -2798,18 +2804,30 @@ export default function App() {
           <h1>Filament conduction simulation</h1>
 
           <div className="fs-header-actions">
-            <label className="fs-simplified-mode-toggle">
-              <input
-                type="checkbox"
-                checked={simplifiedMode}
-                onChange={toggleSimplifiedMode}
-                aria-label="Simplified electron motion"
-              />
-              <span className="fs-simplified-mode-track" aria-hidden="true">
-                <span className="fs-simplified-mode-thumb" />
-              </span>
-              <span>Simplified electron motion</span>
-            </label>
+            <div className="fs-motion-mode-control">
+              <label className="fs-simplified-mode-toggle">
+                <input
+                  type="checkbox"
+                  checked={simplifiedMode}
+                  onChange={toggleSimplifiedMode}
+                  aria-label="Simplified electron motion"
+                />
+                <span className="fs-simplified-mode-track" aria-hidden="true">
+                  <span className="fs-simplified-mode-thumb" />
+                </span>
+                <span>Simplified electron motion</span>
+              </label>
+
+              <button
+                type="button"
+                className="fs-motion-mode-info"
+                onClick={() => setShowMotionModeExplanation(true)}
+                aria-label="Explain the electron motion modes"
+                title="About the electron motion modes"
+              >
+                i
+              </button>
+            </div>
 
             <button
               type="button"
@@ -2920,13 +2938,15 @@ export default function App() {
                 >
                   {paused ? "Resume" : "Pause"}
                 </button>
-                <button
-                  className="fs-refresh-electrons-button"
-                  onClick={resetSimulation}
-                  style={buttonStyle}
-                >
-                  Refresh electrons
-                </button>
+                {SHOW_REFRESH_ELECTRONS_CONTROL && (
+                  <button
+                    className="fs-refresh-electrons-button"
+                    onClick={resetSimulation}
+                    style={buttonStyle}
+                  >
+                    Refresh electrons
+                  </button>
+                )}
               </div>
             </div>
           </div>
@@ -2946,6 +2966,24 @@ export default function App() {
               className="fs-microscopic-overlay"
               aria-hidden="true"
             />
+
+            <div
+              className="fs-particle-key"
+              style={{
+                left: `${((MICROSCOPIC_FRAME_RENDER.x + MICROSCOPIC_FRAME_RENDER.width - 183) / WIDTH) * 100}%`,
+                top: `${((MICROSCOPIC_FRAME_RENDER.y + 48) / HEIGHT) * 100}%`,
+              }}
+              aria-label="Particle key: large spheres are ions and small blue dots are electrons"
+            >
+              <span className="fs-particle-key-item">
+                <span className="fs-particle-key-ion" aria-hidden="true" />
+                <span>ion</span>
+              </span>
+              <span className="fs-particle-key-item">
+                <span className="fs-particle-key-electron" aria-hidden="true" />
+                <span>electron</span>
+              </span>
+            </div>
 
             <img
               src={activeCircuitDiagram}
@@ -3153,7 +3191,7 @@ export default function App() {
                 <ReadoutCard
                   label="Digital ammeter"
                   value={`${readout.current.toFixed(simplifiedMode ? 2 : 1)} A`}
-                  detail="5 s rolling average"
+                  detail={simplifiedMode ? null : "5 s rolling average"}
                   minimised={digitalCurrentMinimised}
                   onToggleMinimise={() =>
                     setDigitalCurrentMinimised((value) => !value)
@@ -3186,6 +3224,67 @@ export default function App() {
         </section>
 
       </main>
+
+      {showMotionModeExplanation && (
+        <div
+          className="fs-circuit-modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              setShowMotionModeExplanation(false);
+            }
+          }}
+        >
+          <div
+            className="fs-circuit-modal fs-density-modal fs-motion-mode-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="fs-motion-mode-modal-title"
+          >
+            <div className="fs-circuit-modal-header">
+              <h2 id="fs-motion-mode-modal-title">Electron motion modes</h2>
+              <button
+                type="button"
+                className="fs-circuit-modal-close"
+                onClick={() => setShowMotionModeExplanation(false)}
+                aria-label="Close electron motion modes explanation"
+                title="Close"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="fs-density-modal-body fs-motion-mode-modal-body">
+              <section>
+                <h3>Simplified motion (default)</h3>
+                <p>
+                  A smaller number of representative electrons move in a clear
+                  overall direction, so their acceleration, collisions and
+                  trails are easier to follow. The ammeter follows the expected
+                  filament I-V curve with a small amount of measurement
+                  variation, while the temperature follows the electrical power.
+                </p>
+              </section>
+
+              <section>
+                <h3>Detailed motion</h3>
+                <p>
+                  Many more representative electrons repel each other and scatter. The
+                  current is directly computed from the net number of electrons crossing the filament
+                  over a rolling average of five seconds, and heating comes directly from the simulated
+                  collisions. The readings are therefore noisier and may not
+                  follow the expected curve as closely.
+                </p>
+              </section>
+
+              <p className="fs-motion-mode-note">
+                The circuit, voltage, polarity and flow directions stay the
+                same.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showIVGraphExplanation && (
         <div
@@ -3715,12 +3814,14 @@ function ReadoutCard({
           >
             {value}
           </div>
-          <div
-            className="fs-readout-detail"
-            style={{ marginTop: 4, fontSize: 11, color: "#87939c" }}
-          >
-            {detail}
-          </div>
+          {detail && (
+            <div
+              className="fs-readout-detail"
+              style={{ marginTop: 4, fontSize: 11, color: "#87939c" }}
+            >
+              {detail}
+            </div>
+          )}
         </>
       )}
     </div>
@@ -3807,6 +3908,12 @@ const layoutCss = `
     flex: 0 0 auto;
   }
 
+  .fs-motion-mode-control {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+
   .fs-simplified-mode-toggle {
     display: inline-flex;
     align-items: center;
@@ -3866,6 +3973,31 @@ const layoutCss = `
   }
 
   .fs-simplified-mode-toggle input:focus-visible + .fs-simplified-mode-track {
+    outline: 3px solid rgba(77, 143, 200, 0.26);
+    outline-offset: 2px;
+  }
+
+  .fs-motion-mode-info {
+    display: inline-grid;
+    place-items: center;
+    width: 23px;
+    height: 23px;
+    padding: 0;
+    border: 1px solid #aebdca;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.9);
+    color: #526b7d;
+    font: 800 13px/1 Georgia, serif;
+    cursor: pointer;
+  }
+
+  .fs-motion-mode-info:hover {
+    border-color: #7892a6;
+    background: #f3f7fa;
+    color: #24445d;
+  }
+
+  .fs-motion-mode-info:focus-visible {
     outline: 3px solid rgba(77, 143, 200, 0.26);
     outline-offset: 2px;
   }
@@ -3977,6 +4109,32 @@ const layoutCss = `
 
   .fs-density-modal-body p:last-child {
     margin-bottom: 0;
+  }
+
+  .fs-motion-mode-modal-body section + section {
+    margin-top: 18px;
+    padding-top: 18px;
+    border-top: 1px solid #dbe4ea;
+  }
+
+  .fs-motion-mode-modal-body h3 {
+    margin: 0 0 6px;
+    color: #193f5b;
+    font-size: 16px;
+    line-height: 1.25;
+  }
+
+  .fs-motion-mode-modal-body section p {
+    margin: 0;
+  }
+
+  .fs-motion-mode-note {
+    margin-top: 18px !important;
+    padding: 11px 12px;
+    border-radius: 9px;
+    background: #edf5fa;
+    color: #36576e;
+    font-size: 0.94em;
   }
 
   .fs-iv-explanation-modal {
@@ -4413,6 +4571,60 @@ const layoutCss = `
     pointer-events: none;
   }
 
+  .fs-particle-key {
+    position: absolute;
+    z-index: 4;
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    min-height: 16px;
+    padding: 4px 7px;
+    border: 1px solid rgba(177, 193, 204, 0.72);
+    border-radius: 10px;
+    background: rgba(247, 250, 252, 0.88);
+    box-shadow: 0 2px 7px rgba(20, 31, 39, 0.18);
+    color: #243d50;
+    font: 750 9px/1 system-ui, sans-serif;
+    pointer-events: none;
+    white-space: nowrap;
+  }
+
+  .fs-particle-key-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .fs-particle-key-ion {
+    width: 15px;
+    height: 15px;
+    flex: 0 0 auto;
+    border-radius: 50%;
+    background: radial-gradient(
+      circle at 32% 28%,
+      #e2e6e9 0%,
+      #7b848c 45%,
+      #404950 100%
+    );
+    box-shadow: 0 0 3px rgba(177, 188, 196, 0.48);
+  }
+
+  .fs-particle-key-electron {
+    position: relative;
+    width: 8px;
+    height: 8px;
+    flex: 0 0 auto;
+    border-radius: 50%;
+    background: radial-gradient(
+      circle at 34% 30%,
+      #ecfdff 0%,
+      #58d5ff 45%,
+      #0878b6 100%
+    );
+    box-shadow: 0 0 5px rgba(50, 198, 255, 0.9);
+  }
+
   .fs-circuit-context-image {
     position: absolute;
     z-index: 2;
@@ -4521,11 +4733,11 @@ const layoutCss = `
 
   .fs-flow-row {
     display: grid;
-    grid-template-columns: 74px minmax(0, 1fr);
+    grid-template-columns: 84px minmax(0, 1fr);
     align-items: center;
     gap: 7px;
-    min-height: 15px;
-    font: 750 9px/1 system-ui, sans-serif;
+    min-height: 17px;
+    font: 750 11px/1 system-ui, sans-serif;
   }
 
   .fs-flow-row + .fs-flow-row {
@@ -4563,7 +4775,7 @@ const layoutCss = `
 
   .fs-no-flow {
     color: #758692;
-    font-size: 8px;
+    font-size: 10px;
     font-weight: 700;
     text-align: center;
   }
@@ -4580,14 +4792,14 @@ const layoutCss = `
     align-items: center;
     justify-content: space-between;
     gap: 8px;
-    min-height: 22px;
-    padding: 4px 7px;
+    min-height: 26px;
+    padding: 5px 8px;
     border: 1px solid rgba(164, 179, 191, 0.72);
     border-radius: 999px;
     background: rgba(255, 255, 255, 0.92);
     box-shadow: 0 3px 9px rgba(31, 50, 65, 0.08);
     color: #52636f;
-    font: 750 8px/1 system-ui, sans-serif;
+    font: 750 10px/1 system-ui, sans-serif;
     letter-spacing: 0.01em;
     pointer-events: none;
     white-space: nowrap;
