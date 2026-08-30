@@ -3363,11 +3363,23 @@ export default function App() {
               </span>
             </div>
 
-            <img
-              src={activeCircuitDiagram}
-              alt={`Series circuit with a ${voltage < 0 ? "negative" : "positive"} potential difference and ammeter`}
-              className="fs-circuit-context-image"
-            />
+            <div className="fs-circuit-context">
+              <img
+                src={activeCircuitDiagram}
+                alt={`Series circuit with a ${voltage < 0 ? "negative" : "positive"} potential difference and ammeter`}
+                className="fs-circuit-context-image"
+              />
+              {hasTerminalPolarity && (
+                <span
+                  className={`fs-battery-positive-marker ${
+                    voltage > 0 ? "is-left" : "is-right"
+                  }`}
+                  aria-hidden="true"
+                >
+                  +
+                </span>
+              )}
+            </div>
 
             <div
               className="fs-circuit-bulb"
@@ -3783,10 +3795,7 @@ export default function App() {
                 </dl>
               </section>
 
-              <p className="fs-motion-mode-note">
-                The circuit, voltage, polarity and flow directions stay the
-                same.
-              </p>
+              
             </div>
           </div>
         </div>
@@ -5328,15 +5337,45 @@ const layoutCss = `
     box-shadow: 0 0 5px rgba(50, 198, 255, 0.9);
   }
 
-  .fs-circuit-context-image {
+  .fs-circuit-context {
     position: absolute;
     z-index: 2;
-    left: calc(4.0625% + ${(MACRO_VIEW_OFFSET_X / WIDTH) * 100}%);
-    top: calc(37.24% + ${(MACRO_VIEW_OFFSET_Y / HEIGHT) * 100}% + 5px);
-    width: 22.5%;
+    left: calc(1.8125% + ${(MACRO_VIEW_OFFSET_X / WIDTH) * 100}%);
+    top: calc(37.24% + ${(MACRO_VIEW_OFFSET_Y / HEIGHT) * 100}% - 1px);
+    width: 27%;
     height: auto;
     pointer-events: none;
     user-select: none;
+  }
+
+  .fs-circuit-context-image {
+    display: block;
+    width: 100%;
+    height: auto;
+  }
+
+  .fs-battery-positive-marker {
+    position: absolute;
+    z-index: 1;
+    top: 68.5%;
+    width: 20px;
+    height: 22px;
+    display: grid;
+    place-items: center;
+    transform: translate(-50%, -50%);
+    color: #111111;
+    font-family: Arial, sans-serif;
+    font-size: 22px;
+    font-weight: 600;
+    line-height: 1;
+  }
+
+  .fs-battery-positive-marker.is-left {
+    left: 34.7%;
+  }
+
+  .fs-battery-positive-marker.is-right {
+    left: 72.3%;
   }
 
   .fs-circuit-bulb {
