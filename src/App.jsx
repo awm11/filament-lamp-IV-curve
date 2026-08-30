@@ -24,6 +24,8 @@ const IV_PANEL_WIDTH = ANALYSIS_WIDTH; // all analysis panels now share the same
 const IV_PANEL_Y = 29;
 const IV_PANEL_HEIGHT = 491;
 const IV_PANEL_COLLAPSED_HEIGHT = 42;
+const MAXIMISED_GRAPH_PADDING = 4;
+const KEYBOARD_POINT_FLASH_MS = 1200;
 const HISTORY_PANEL_HEIGHT = 170;
 const HISTORY_PANEL_COLLAPSED_HEIGHT = 42;
 const INSTRUMENT_PANEL_HEIGHT = 174;
@@ -46,6 +48,7 @@ const SHOW_REFRESH_ELECTRONS_CONTROL = false;
 const BULB_GLOW_START_TEMP = 400;
 const BULB_GLOW_FULL_TEMP = 1600;
 const MAX_VOLTAGE = 12;
+const SLIDER_POINTER_GUTTER = 7;
 const MAX_RESERVOIR_ELECTRONS = 1382; // 96% of 1440 to preserve density in 0.96x chamber area
 const MAX_TOTAL_ELECTRONS = 2700;
 const SIMPLIFIED_PARTICLE_DIVISOR = 10;
@@ -1686,7 +1689,14 @@ function recordSimplifiedElectronTrail(electron, dt) {
   }
 }
 
-function drawIVGraph(ctx, points, minimised = false, showTrendOverlay = false) {
+function drawIVGraph(
+  ctx,
+  points,
+  minimised = false,
+  showTrendOverlay = false,
+  highlightedPointIndex = null,
+  keyboardPointFlash = null
+) {
   // The I-V graph anchors the same right-hand analysis column as the current-history
   // panel and instrument cluster. All offsets below are local to this one panel.
   const x = ANALYSIS_X;
@@ -1869,15 +1879,17 @@ function drawIVGraph(ctx, points, minimised = false, showTrendOverlay = false) {
 
   ctx.save();
   const markerHalfSize = 7;
+  const highlightedMarkerHalfSize = 11;
+  const flashClipMargin = 25;
   ctx.beginPath();
   // Let markers extend beyond the plot boundary by half their size. This keeps
   // endpoint data (for example ±12 V) at its exact axis coordinate while
   // still showing the complete marker.
   ctx.rect(
-    plotLeft - markerHalfSize - 2,
-    plotTop - markerHalfSize - 2,
-    plotWidth + (markerHalfSize + 2) * 2,
-    plotHeight + (markerHalfSize + 2) * 2
+    plotLeft - flashClipMargin,
+    plotTop - flashClipMargin,
+    plotWidth + flashClipMargin * 2,
+    plotHeight + flashClipMargin * 2
   );
   ctx.clip();
 
@@ -1886,24 +1898,89 @@ function drawIVGraph(ctx, points, minimised = false, showTrendOverlay = false) {
     if (!Number.isFinite(point.voltage) || !Number.isFinite(point.current)) continue;
     const px = voltageToX(point.voltage);
     const py = currentToY(point.current);
+    const isKeyboardFlashing = index === keyboardPointFlash?.index;
+    const flashPulse = isKeyboardFlashing
+      ? (0.5 + 0.5 * Math.sin(keyboardPointFlash.progress * Math.PI * 6)) *
+        (1 - keyboardPointFlash.progress * 0.35)
+      : 0;
+    const pointMarkerHalfSize =
+      index === highlightedPointIndex
+        ? Math.max(highlightedMarkerHalfSize, markerHalfSize + flashPulse * 6)
+        : markerHalfSize + flashPulse * 6;
+
+    if (isKeyboardFlashing) {
+      ctx.beginPath();
+      ctx.arc(px, py, 12 + flashPulse * 10, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(255, 185, 36, ${0.28 + flashPulse * 0.68})`;
+      ctx.lineWidth = 3 + flashPulse * 3;
+      ctx.stroke();
+    }
 
     ctx.beginPath();
-    ctx.moveTo(px - markerHalfSize, py - markerHalfSize);
-    ctx.lineTo(px + markerHalfSize, py + markerHalfSize);
-    ctx.moveTo(px + markerHalfSize, py - markerHalfSize);
-    ctx.lineTo(px - markerHalfSize, py + markerHalfSize);
+    ctx.moveTo(px - pointMarkerHalfSize, py - pointMarkerHalfSize);
+    ctx.lineTo(px + pointMarkerHalfSize, py + pointMarkerHalfSize);
+    ctx.moveTo(px + pointMarkerHalfSize, py - pointMarkerHalfSize);
+    ctx.lineTo(px - pointMarkerHalfSize, py + pointMarkerHalfSize);
     ctx.lineCap = "round";
     ctx.strokeStyle = "rgba(255, 255, 255, 0.96)";
-    ctx.lineWidth = 5;
+    ctx.lineWidth =
+      index === highlightedPointIndex || isKeyboardFlashing ? 7 : 5;
     ctx.stroke();
     ctx.strokeStyle = "#a7195b";
-    ctx.lineWidth = 2.8;
+    ctx.lineWidth =
+      index === highlightedPointIndex || isKeyboardFlashing ? 4 : 2.8;
     ctx.stroke();
   }
   ctx.restore();
 }
 
-function drawScene(ctx, electrons, ions, tempC, liveCurrent, displayedHistoryCurrent, measurementHistory, voltageEvents, ivPoints, now, ivGraphMinimised, currentHistoryMinimised, showTrendOverlay) {
+function drawMaximisedIVGraph(
+  canvas,
+  points,
+  showTrendOverlay,
+  highlightedPointIndex,
+  keyboardPointFlash
+) {
+  if (!canvas) return;
+
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.setTransform(
+    CANVAS_RENDER_SCALE,
+    0,
+    0,
+    CANVAS_RENDER_SCALE,
+    (MAXIMISED_GRAPH_PADDING - ANALYSIS_X) * CANVAS_RENDER_SCALE,
+    (MAXIMISED_GRAPH_PADDING - IV_PANEL_Y) * CANVAS_RENDER_SCALE
+  );
+  drawIVGraph(
+    ctx,
+    points,
+    false,
+    showTrendOverlay,
+    highlightedPointIndex,
+    keyboardPointFlash
+  );
+}
+
+function drawScene(
+  ctx,
+  electrons,
+  ions,
+  tempC,
+  liveCurrent,
+  displayedHistoryCurrent,
+  measurementHistory,
+  voltageEvents,
+  ivPoints,
+  now,
+  ivGraphMinimised,
+  currentHistoryMinimised,
+  showTrendOverlay,
+  highlightedPointIndex,
+  keyboardPointFlash
+) {
   ctx.clearRect(0, 0, WIDTH, HEIGHT);
 
   const gradient = ctx.createLinearGradient(0, 0, 0, HEIGHT);
@@ -2081,11 +2158,19 @@ function drawScene(ctx, electrons, ions, tempC, liveCurrent, displayedHistoryCur
     historyPanelTop(ivGraphMinimised),
     currentHistoryMinimised
   );
-  drawIVGraph(ctx, ivPoints, ivGraphMinimised, showTrendOverlay);
+  drawIVGraph(
+    ctx,
+    ivPoints,
+    ivGraphMinimised,
+    showTrendOverlay,
+    highlightedPointIndex,
+    keyboardPointFlash
+  );
 }
 export default function App() {
   const canvasRef = useRef(null);
   const microscopicOverlayRef = useRef(null);
+  const maximisedIVGraphRef = useRef(null);
   const electronsRef = useRef([]);
   const ionsRef = useRef(makeIonLattice());
   const voltageRef = useRef(DEFAULT_VOLTAGE);
@@ -2100,6 +2185,17 @@ export default function App() {
   const currentHistoryRef = useRef([]);
   const voltageEventsRef = useRef([]);
   const ivPointsRef = useRef([]);
+  const keyboardPointFlashRef = useRef(null);
+  const hoveredIVPointIndexRef = useRef(null);
+  const hoveredIVPointSurfaceRef = useRef(null);
+  const decreaseVoltageButtonRef = useRef(null);
+  const increaseVoltageButtonRef = useRef(null);
+  const sliderPointerIdRef = useRef(null);
+  const keyboardActionsRef = useRef({
+    decreaseVoltage: null,
+    increaseVoltage: null,
+    captureDataPoint: null,
+  });
   const lastHistorySampleRef = useRef(0);
   const pausedRef = useRef(false);
   const simplifiedModeRef = useRef(true);
@@ -2128,6 +2224,8 @@ export default function App() {
     useState(false);
   const [showIVGraphExplanation, setShowIVGraphExplanation] = useState(false);
   const [ivGraphMinimised, setIvGraphMinimised] = useState(false);
+  const [ivGraphMaximised, setIvGraphMaximised] = useState(false);
+  const [hoveredIVPoint, setHoveredIVPoint] = useState(null);
   const [showTrendOverlay, setShowTrendOverlay] = useState(false);
   const [analogueMeterMinimised, setAnalogueMeterMinimised] = useState(false);
   const [digitalCurrentMinimised, setDigitalCurrentMinimised] = useState(false);
@@ -2155,7 +2253,11 @@ export default function App() {
   }, [paused]);
 
   useEffect(() => {
-    if (!showMotionModeExplanation && !showIVGraphExplanation) {
+    if (
+      !showMotionModeExplanation &&
+      !showIVGraphExplanation &&
+      !ivGraphMaximised
+    ) {
       return undefined;
     }
 
@@ -2163,12 +2265,16 @@ export default function App() {
       if (event.key === "Escape") {
         setShowMotionModeExplanation(false);
         setShowIVGraphExplanation(false);
+        setIvGraphMaximised(false);
+        hoveredIVPointIndexRef.current = null;
+        hoveredIVPointSurfaceRef.current = null;
+        setHoveredIVPoint(null);
       }
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [showMotionModeExplanation, showIVGraphExplanation]);
+  }, [showMotionModeExplanation, showIVGraphExplanation, ivGraphMaximised]);
 
   useEffect(() => {
     ivGraphMinimisedRef.current = ivGraphMinimised;
@@ -2461,6 +2567,20 @@ export default function App() {
         (count, electron) => count + (inSourceReservoir(electron, voltageRef.current) ? 1 : 0),
         0
       );
+      const keyboardPointFlashRecord = keyboardPointFlashRef.current;
+      let keyboardPointFlash = null;
+      if (keyboardPointFlashRecord) {
+        const progress =
+          (now - keyboardPointFlashRecord.start) / KEYBOARD_POINT_FLASH_MS;
+        if (progress < 1) {
+          keyboardPointFlash = {
+            index: keyboardPointFlashRecord.index,
+            progress: Math.max(0, progress),
+          };
+        } else {
+          keyboardPointFlashRef.current = null;
+        }
+      }
 
       drawScene(
         ctx,
@@ -2475,7 +2595,21 @@ export default function App() {
         historyNow,
         ivGraphMinimisedRef.current,
         currentHistoryMinimisedRef.current,
-        showTrendOverlayRef.current
+        showTrendOverlayRef.current,
+        hoveredIVPointSurfaceRef.current === "normal"
+          ? hoveredIVPointIndexRef.current
+          : null,
+        keyboardPointFlash
+      );
+
+      drawMaximisedIVGraph(
+        maximisedIVGraphRef.current,
+        ivPointsRef.current,
+        showTrendOverlayRef.current,
+        hoveredIVPointSurfaceRef.current === "maximised"
+          ? hoveredIVPointIndexRef.current
+          : null,
+        keyboardPointFlash
       );
 
       // Repaint the microscopic panel on a foreground canvas. The zoom wedge
@@ -2681,15 +2815,16 @@ export default function App() {
     );
   };
 
-  const handleVoltageChange = (event) => {
-    applyVoltage(event.target.value);
-  };
-
   const setVoltageFromSliderPointer = (event) => {
     const bounds = event.currentTarget.getBoundingClientRect();
+    const trackLeft = bounds.left + SLIDER_POINTER_GUTTER;
+    const trackWidth = Math.max(
+      1,
+      bounds.width - SLIDER_POINTER_GUTTER * 2
+    );
     const proportion = Math.max(
       0,
-      Math.min(1, (event.clientX - bounds.left) / bounds.width)
+      Math.min(1, (event.clientX - trackLeft) / trackWidth)
     );
     applyVoltage(-MAX_VOLTAGE + proportion * MAX_VOLTAGE * 2);
   };
@@ -2697,25 +2832,50 @@ export default function App() {
   const handleVoltagePointerDown = (event) => {
     if (event.button !== 0) return;
     event.preventDefault();
-    event.currentTarget.focus();
+    sliderPointerIdRef.current = event.pointerId;
     event.currentTarget.setPointerCapture(event.pointerId);
     setVoltageFromSliderPointer(event);
   };
 
   const handleVoltagePointerMove = (event) => {
-    if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+    if (sliderPointerIdRef.current !== event.pointerId) return;
     setVoltageFromSliderPointer(event);
   };
 
   const handleVoltagePointerUp = (event) => {
-    if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+    if (sliderPointerIdRef.current !== event.pointerId) return;
     setVoltageFromSliderPointer(event);
-    event.currentTarget.releasePointerCapture(event.pointerId);
+    sliderPointerIdRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
   };
 
   const handleVoltagePointerCancel = (event) => {
-    if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
-    event.currentTarget.releasePointerCapture(event.pointerId);
+    if (sliderPointerIdRef.current !== event.pointerId) return;
+    sliderPointerIdRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  };
+
+  const handleVoltageSliderKeyDown = (event) => {
+    let nextVoltage = null;
+
+    if (event.key === "ArrowLeft" || event.key === "ArrowDown") {
+      nextVoltage = voltageRef.current - 0.5;
+    } else if (event.key === "ArrowRight" || event.key === "ArrowUp") {
+      nextVoltage = voltageRef.current + 0.5;
+    } else if (event.key === "Home") {
+      nextVoltage = -MAX_VOLTAGE;
+    } else if (event.key === "End") {
+      nextVoltage = MAX_VOLTAGE;
+    }
+
+    if (nextVoltage === null) return;
+    event.preventDefault();
+    event.stopPropagation();
+    applyVoltage(nextVoltage);
   };
 
   const stepVoltage = (delta) => {
@@ -2742,11 +2902,205 @@ export default function App() {
       voltage: voltageRef.current,
       current,
     });
+    keyboardPointFlashRef.current = {
+      index: ivPointsRef.current.length - 1,
+      start: performance.now(),
+    };
   };
 
   const clearCapturedData = () => {
     ivPointsRef.current = [];
+    keyboardPointFlashRef.current = null;
+    hoveredIVPointIndexRef.current = null;
+    hoveredIVPointSurfaceRef.current = null;
+    setHoveredIVPoint(null);
   };
+
+  const clearHoveredIVPoint = () => {
+    hoveredIVPointIndexRef.current = null;
+    hoveredIVPointSurfaceRef.current = null;
+    setHoveredIVPoint(null);
+  };
+
+  const handleGraphPointerMove = (event, surface) => {
+    if (surface === "normal" && ivGraphMinimisedRef.current) {
+      clearHoveredIVPoint();
+      return;
+    }
+
+    const canvas = event.currentTarget;
+    const bounds = canvas.getBoundingClientRect();
+    if (bounds.width <= 0 || bounds.height <= 0) return;
+
+    const logicalWidth = canvas.width / CANVAS_RENDER_SCALE;
+    const logicalHeight = canvas.height / CANVAS_RENDER_SCALE;
+    const pointerX =
+      ((event.clientX - bounds.left) / bounds.width) * logicalWidth;
+    const pointerY =
+      ((event.clientY - bounds.top) / bounds.height) * logicalHeight;
+    const plotLeft =
+      surface === "maximised"
+        ? MAXIMISED_GRAPH_PADDING + 60
+        : ANALYSIS_X + 60;
+    const plotTop =
+      surface === "maximised"
+        ? MAXIMISED_GRAPH_PADDING + 58
+        : IV_PANEL_Y + 58;
+    const plotWidth = IV_PANEL_WIDTH - 162;
+    const plotHeight = IV_PANEL_HEIGHT - 126;
+    const currentMax = 5;
+    const hoverRadius = (18 / bounds.width) * logicalWidth;
+    let closestPoint = null;
+
+    for (let index = 0; index < ivPointsRef.current.length; index += 1) {
+      const point = ivPointsRef.current[index];
+      if (!Number.isFinite(point.voltage) || !Number.isFinite(point.current)) {
+        continue;
+      }
+
+      const pointX =
+        plotLeft +
+        ((point.voltage + MAX_VOLTAGE) / (MAX_VOLTAGE * 2)) * plotWidth;
+      const clampedCurrent = Math.max(-currentMax, Math.min(currentMax, point.current));
+      const pointY =
+        plotTop +
+        plotHeight / 2 -
+        (clampedCurrent / currentMax) * (plotHeight / 2);
+      const distance = Math.hypot(pointerX - pointX, pointerY - pointY);
+
+      if (distance <= hoverRadius && (!closestPoint || distance < closestPoint.distance)) {
+        const pointCssX = (pointX / logicalWidth) * bounds.width;
+        const pointCssY = (pointY / logicalHeight) * bounds.height;
+        const tooltipEdgeMargin = surface === "maximised" ? 102 : 86;
+        const placeBelow =
+          point.voltage < 0 ||
+          pointCssY < (surface === "maximised" ? 112 : 82);
+        const tooltipHorizontalShift = surface === "maximised" ? 45 : 28;
+        const desiredTooltipCentre =
+          pointCssX + (placeBelow ? tooltipHorizontalShift : -tooltipHorizontalShift);
+        closestPoint = {
+          index,
+          surface,
+          voltage: point.voltage,
+          current: point.current,
+          distance,
+          left: Math.max(
+            tooltipEdgeMargin,
+            Math.min(bounds.width - tooltipEdgeMargin, desiredTooltipCentre)
+          ),
+          top: pointCssY,
+          placeBelow,
+        };
+      }
+    }
+
+    hoveredIVPointIndexRef.current = closestPoint?.index ?? null;
+    hoveredIVPointSurfaceRef.current = closestPoint?.surface ?? null;
+    setHoveredIVPoint((currentPoint) => {
+      if (!closestPoint) return currentPoint ? null : currentPoint;
+      if (
+        currentPoint?.index === closestPoint.index &&
+        currentPoint.surface === closestPoint.surface &&
+        currentPoint.left === closestPoint.left &&
+        currentPoint.top === closestPoint.top
+      ) {
+        return currentPoint;
+      }
+      return closestPoint;
+    });
+  };
+
+  const handleMaximisedGraphPointerMove = (event) => {
+    handleGraphPointerMove(event, "maximised");
+  };
+
+  const handleNormalGraphPointerMove = (event) => {
+    handleGraphPointerMove(event, "normal");
+  };
+
+  useEffect(() => {
+    keyboardActionsRef.current.decreaseVoltage = () => stepVoltage(-0.5);
+    keyboardActionsRef.current.increaseVoltage = () => stepVoltage(0.5);
+    keyboardActionsRef.current.captureDataPoint = captureDataPoint;
+  });
+
+  useEffect(() => {
+    const handleKeyboardShortcut = (event) => {
+      if (
+        showMotionModeExplanation ||
+        showIVGraphExplanation ||
+        event.altKey ||
+        event.ctrlKey ||
+        event.metaKey
+      ) {
+        return;
+      }
+
+      const target = event.target;
+      if (
+        target?.isContentEditable ||
+        target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement ||
+        (target instanceof HTMLInputElement && target.type !== "checkbox")
+      ) {
+        return;
+      }
+
+      const flashVoltageButton = (button) => {
+        if (!button?.animate) return;
+        button.getAnimations().forEach((animation) => animation.cancel());
+        button.animate(
+          [
+            { transform: "scale(1)", boxShadow: "none", offset: 0 },
+            {
+              background: "#ffe45c",
+              borderColor: "#d99b00",
+              color: "#563600",
+              transform: "scale(1.38)",
+              boxShadow: "0 0 0 7px rgba(255, 208, 45, 0.38)",
+              offset: 0.22,
+            },
+            { transform: "scale(1)", boxShadow: "none", offset: 0.46 },
+            {
+              background: "#ffe45c",
+              borderColor: "#d99b00",
+              color: "#563600",
+              transform: "scale(1.28)",
+              boxShadow: "0 0 0 5px rgba(255, 208, 45, 0.28)",
+              offset: 0.7,
+            },
+            { transform: "scale(1)", boxShadow: "none", offset: 1 },
+          ],
+          { duration: 620, easing: "ease-out" }
+        );
+      };
+
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        flashVoltageButton(decreaseVoltageButtonRef.current);
+        keyboardActionsRef.current.decreaseVoltage?.();
+      } else if (event.key === "ArrowRight") {
+        event.preventDefault();
+        flashVoltageButton(increaseVoltageButtonRef.current);
+        keyboardActionsRef.current.increaseVoltage?.();
+      } else if (event.key.toLowerCase() === "x" && !event.repeat) {
+        event.preventDefault();
+        keyboardActionsRef.current.captureDataPoint?.();
+      } else if (event.key.toLowerCase() === "t" && !event.repeat) {
+        event.preventDefault();
+        setShowTrendOverlay((value) => !value);
+      } else if (event.key.toLowerCase() === "m" && !event.repeat) {
+        event.preventDefault();
+        hoveredIVPointIndexRef.current = null;
+        hoveredIVPointSurfaceRef.current = null;
+        setHoveredIVPoint(null);
+        setIvGraphMaximised((value) => !value);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyboardShortcut);
+    return () => window.removeEventListener("keydown", handleKeyboardShortcut);
+  }, [showMotionModeExplanation, showIVGraphExplanation]);
 
   const bulbHeatLevel = bulbGlowHeatLevel(readout.temperature);
   const bulbGlowStrength = Math.pow(bulbHeatLevel, 0.58);
@@ -2851,6 +3205,7 @@ export default function App() {
               <div className="fs-voltage-stepper">
                 <button
                   type="button"
+                  ref={decreaseVoltageButtonRef}
                   className="fs-voltage-step-button"
                   onClick={() => stepVoltage(-0.5)}
                   disabled={voltage <= -MAX_VOLTAGE}
@@ -2876,20 +3231,23 @@ export default function App() {
                     }%`,
                   }}
                 >
-                  <input
-                    className="fs-slider"
-                    type="range"
-                    min={-MAX_VOLTAGE}
-                    max={MAX_VOLTAGE}
-                    step="0.5"
-                    value={voltage}
-                    onChange={handleVoltageChange}
+                  <div
+                    className="fs-slider-hit-area"
+                    role="slider"
+                    tabIndex={0}
+                    aria-label="Potential difference"
+                    aria-valuemin={-MAX_VOLTAGE}
+                    aria-valuemax={MAX_VOLTAGE}
+                    aria-valuenow={voltage}
+                    aria-valuetext={`${voltage.toFixed(1)} volts`}
+                    aria-keyshortcuts="ArrowLeft ArrowRight Home End"
                     onPointerDown={handleVoltagePointerDown}
                     onPointerMove={handleVoltagePointerMove}
                     onPointerUp={handleVoltagePointerUp}
                     onPointerCancel={handleVoltagePointerCancel}
-                    aria-label="Potential difference"
+                    onKeyDown={handleVoltageSliderKeyDown}
                   />
+                  <span className="fs-slider-rail" aria-hidden="true" />
                   <span className="fs-slider-thumb" aria-hidden="true" />
                   <span className="fs-slider-zero-tick" aria-hidden="true" />
                   <span className="fs-slider-zero-label" aria-hidden="true">
@@ -2899,6 +3257,7 @@ export default function App() {
 
                 <button
                   type="button"
+                  ref={increaseVoltageButtonRef}
                   className="fs-voltage-step-button"
                   onClick={() => stepVoltage(0.5)}
                   disabled={voltage >= MAX_VOLTAGE}
@@ -2915,6 +3274,7 @@ export default function App() {
               <div className="fs-actions">
                 <button
                   onClick={captureDataPoint}
+                  aria-keyshortcuts="x"
                   style={{
                     ...buttonStyle,
                     background: "#a7195b",
@@ -2925,18 +3285,18 @@ export default function App() {
                   Capture data point
                 </button>
                 <button
-                  className="fs-clear-data-button"
-                  onClick={clearCapturedData}
-                  style={buttonStyle}
-                >
-                  Clear data
-                </button>
-                <button
                   className="fs-pause-button"
                   onClick={() => setPaused((value) => !value)}
                   style={buttonStyle}
                 >
                   {paused ? "Resume" : "Pause"}
+                </button>
+                <button
+                  className="fs-clear-data-button"
+                  onClick={clearCapturedData}
+                  style={buttonStyle}
+                >
+                  Clear data
                 </button>
                 {SHOW_REFRESH_ELECTRONS_CONTROL && (
                   <button
@@ -2957,7 +3317,25 @@ export default function App() {
               width={WIDTH * CANVAS_RENDER_SCALE}
               height={HEIGHT * CANVAS_RENDER_SCALE}
               className="fs-stage"
+              onPointerMove={handleNormalGraphPointerMove}
+              onPointerLeave={clearHoveredIVPoint}
             />
+
+            {hoveredIVPoint?.surface === "normal" && (
+              <div
+                className={`fs-iv-point-tooltip${hoveredIVPoint.placeBelow ? " is-below" : ""}`}
+                style={{
+                  left: `${hoveredIVPoint.left}px`,
+                  top: `${hoveredIVPoint.top}px`,
+                }}
+                role="status"
+              >
+                <span>Voltage</span>
+                <strong>{hoveredIVPoint.voltage.toFixed(1)} V</strong>
+                <span>Current</span>
+                <strong>{hoveredIVPoint.current.toFixed(2)} A</strong>
+              </div>
+            )}
 
             <canvas
               ref={microscopicOverlayRef}
@@ -3135,19 +3513,40 @@ export default function App() {
               type="button"
               className={`fs-trend-overlay-toggle${showTrendOverlay ? " is-active" : ""}`}
               style={{
-                left: `${((ANALYSIS_X + ANALYSIS_WIDTH - 56) / WIDTH) * 100}%`,
-                top: `${((IV_PANEL_Y + 6) / HEIGHT) * 100}%`,
+                left: `${((ANALYSIS_X + ANALYSIS_WIDTH - 74) / WIDTH) * 100}%`,
+                top: `${((IV_PANEL_Y + 5) / HEIGHT) * 100}%`,
               }}
               aria-pressed={showTrendOverlay}
+              aria-keyshortcuts="t"
               onClick={() => setShowTrendOverlay((value) => !value)}
             >
               Trend overlay
             </button>
 
+            <button
+              type="button"
+              className="fs-maximise-iv-button"
+              style={{
+                left: `${((ANALYSIS_X + ANALYSIS_WIDTH - 42) / WIDTH) * 100}%`,
+                top: `${((IV_PANEL_Y + 5) / HEIGHT) * 100}%`,
+              }}
+              onClick={() => {
+                clearHoveredIVPoint();
+                setIvGraphMaximised(true);
+              }}
+              aria-label="Maximise I-V graph"
+              aria-keyshortcuts="m"
+              title="Maximise I-V graph"
+            >
+              <svg viewBox="0 0 16 16" aria-hidden="true">
+                <path d="M 6 2 H 2 V 6 M 10 2 H 14 V 6 M 14 10 V 14 H 10 M 6 14 H 2 V 10" />
+              </svg>
+            </button>
+
             <div
               className="fs-history-toggle"
               style={{
-                left: `${((ANALYSIS_X + ANALYSIS_WIDTH - 5) / WIDTH) * 100}%`,
+                left: `${((ANALYSIS_X + ANALYSIS_WIDTH - 10) / WIDTH) * 100}%`,
                 top: `${((IV_PANEL_Y + 5) / HEIGHT) * 100}%`,
               }}
             >
@@ -3225,6 +3624,87 @@ export default function App() {
 
       </main>
 
+      {ivGraphMaximised && (
+        <div
+          className="fs-maximised-graph-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              setIvGraphMaximised(false);
+              clearHoveredIVPoint();
+            }
+          }}
+        >
+          <div
+            className="fs-maximised-graph-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Maximised I-V characteristic graph"
+          >
+            <div className="fs-maximised-graph-toolbar">
+              <div className="fs-maximised-graph-actions">
+                <button
+                  type="button"
+                  className={`fs-maximised-trend-toggle${showTrendOverlay ? " is-active" : ""}`}
+                  aria-pressed={showTrendOverlay}
+                  aria-keyshortcuts="t"
+                  onClick={() => setShowTrendOverlay((value) => !value)}
+                >
+                  Trend overlay
+                </button>
+                <button
+                  type="button"
+                  className="fs-maximised-graph-close"
+                  onClick={() => {
+                    setIvGraphMaximised(false);
+                    clearHoveredIVPoint();
+                  }}
+                  aria-label="Close maximised I-V graph"
+                  aria-keyshortcuts="Escape m"
+                  title="Return to simulation"
+                >
+                  ×
+                </button>
+              </div>
+            </div>
+
+            <div className="fs-maximised-graph-canvas-wrap">
+              <canvas
+                ref={maximisedIVGraphRef}
+                width={
+                  (IV_PANEL_WIDTH + MAXIMISED_GRAPH_PADDING * 2) *
+                  CANVAS_RENDER_SCALE
+                }
+                height={
+                  (IV_PANEL_HEIGHT + MAXIMISED_GRAPH_PADDING * 2) *
+                  CANVAS_RENDER_SCALE
+                }
+                className="fs-maximised-graph-canvas"
+                role="img"
+                aria-label="Maximised I-V characteristic graph"
+                onPointerMove={handleMaximisedGraphPointerMove}
+                onPointerLeave={clearHoveredIVPoint}
+              />
+              {hoveredIVPoint?.surface === "maximised" && (
+                <div
+                  className={`fs-iv-point-tooltip is-maximised${hoveredIVPoint.placeBelow ? " is-below" : ""}`}
+                  style={{
+                    left: `${hoveredIVPoint.left}px`,
+                    top: `${hoveredIVPoint.top}px`,
+                  }}
+                  role="status"
+                >
+                  <span>Voltage</span>
+                  <strong>{hoveredIVPoint.voltage.toFixed(1)} V</strong>
+                  <span>Current</span>
+                  <strong>{hoveredIVPoint.current.toFixed(2)} A</strong>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {showMotionModeExplanation && (
         <div
           className="fs-circuit-modal-backdrop"
@@ -3275,6 +3755,32 @@ export default function App() {
                   collisions. The readings are therefore noisier and may not
                   follow the expected curve as closely.
                 </p>
+              </section>
+
+              <section className="fs-keyboard-shortcuts">
+                <h3>Keyboard shortcuts</h3>
+                <dl>
+                  <div>
+                    <dt><kbd>←</kbd></dt>
+                    <dd>Decrease voltage by 0.5 V</dd>
+                  </div>
+                  <div>
+                    <dt><kbd>→</kbd></dt>
+                    <dd>Increase voltage by 0.5 V</dd>
+                  </div>
+                  <div>
+                    <dt><kbd>X</kbd></dt>
+                    <dd>Capture a data point</dd>
+                  </div>
+                  <div>
+                    <dt><kbd>T</kbd></dt>
+                    <dd>Toggle the trend overlay</dd>
+                  </div>
+                  <div>
+                    <dt><kbd>M</kbd></dt>
+                    <dd>Toggle the maximised graph</dd>
+                  </div>
+                </dl>
               </section>
 
               <p className="fs-motion-mode-note">
@@ -4035,6 +4541,189 @@ const layoutCss = `
     background: rgba(20, 28, 36, 0.58);
   }
 
+  .fs-maximised-graph-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 1100;
+    display: grid;
+    place-items: center;
+    padding: 22px;
+    background: rgba(20, 28, 36, 0.68);
+    backdrop-filter: blur(2px);
+  }
+
+  .fs-maximised-graph-dialog {
+    width: min(94vw, 1080px, calc((92vh - 64px) * 1.324));
+    max-height: 92vh;
+    overflow: hidden;
+    border: 1px solid rgba(192, 204, 213, 0.95);
+    border-radius: 15px;
+    background: #f8fafc;
+    box-shadow: 0 28px 86px rgba(8, 15, 21, 0.44);
+  }
+
+  .fs-maximised-graph-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 18px;
+    min-height: 48px;
+    padding: 7px 9px;
+    border-bottom: 1px solid #d7e0e7;
+    background: #f5f8fa;
+  }
+
+  .fs-maximised-graph-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .fs-maximised-trend-toggle,
+  .fs-maximised-graph-close {
+    border: 1px solid #aab8c3;
+    background: #ffffff;
+    color: #3c5060;
+    cursor: pointer;
+  }
+
+  .fs-maximised-trend-toggle {
+    min-height: 30px;
+    padding: 4px 10px;
+    border-color: #8d78b8;
+    border-radius: 7px;
+    color: #5b3e97;
+    font-size: 12px;
+    font-weight: 750;
+  }
+
+  .fs-maximised-trend-toggle.is-active {
+    background: #5b3e97;
+    color: #ffffff;
+  }
+
+  .fs-maximised-graph-close {
+    display: grid;
+    place-items: center;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border-radius: 8px;
+    font-size: 21px;
+    font-weight: 700;
+    line-height: 1;
+  }
+
+  .fs-maximised-trend-toggle:hover,
+  .fs-maximised-graph-close:hover {
+    filter: brightness(0.96);
+  }
+
+  .fs-maximised-trend-toggle:focus-visible,
+  .fs-maximised-graph-close:focus-visible {
+    outline: 3px solid rgba(77, 143, 200, 0.28);
+    outline-offset: 2px;
+  }
+
+  .fs-maximised-graph-canvas {
+    display: block;
+    width: 100%;
+    height: auto;
+    max-height: calc(92vh - 49px);
+    background: #f8fafc;
+    cursor: crosshair;
+  }
+
+  .fs-maximised-graph-canvas-wrap {
+    position: relative;
+  }
+
+  .fs-iv-point-tooltip {
+    position: absolute;
+    z-index: 20;
+    display: grid;
+    grid-template-columns: auto auto;
+    gap: 3px 6px;
+    min-width: clamp(105px, 9vw, 112px);
+    padding: clamp(6px, 0.55vw, 8px) clamp(7px, 0.65vw, 9px);
+    border: 1px solid rgba(255, 255, 255, 0.22);
+    border-radius: 8px;
+    background: rgba(32, 42, 51, 0.96);
+    color: #f7fafc;
+    box-shadow: 0 7px 22px rgba(15, 22, 28, 0.3);
+    font-size: clamp(10px, 0.8vw, 13px);
+    line-height: 1.25;
+    font-variant-numeric: tabular-nums;
+    pointer-events: none;
+    transform: translate(-50%, calc(-100% - 12px));
+  }
+
+  .fs-iv-point-tooltip::after {
+    content: "";
+    position: absolute;
+    left: 75%;
+    bottom: -7px;
+    width: 12px;
+    height: 12px;
+    border-right: 1px solid rgba(255, 255, 255, 0.22);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.22);
+    background: rgba(32, 42, 51, 0.96);
+    transform: translateX(-50%) rotate(45deg);
+  }
+
+  .fs-iv-point-tooltip.is-below {
+    transform: translate(-50%, 12px);
+  }
+
+  .fs-iv-point-tooltip.is-below::after {
+    top: -7px;
+    bottom: auto;
+    left: 25%;
+    border: 0;
+    border-top: 1px solid rgba(255, 255, 255, 0.22);
+    border-left: 1px solid rgba(255, 255, 255, 0.22);
+  }
+
+  .fs-iv-point-tooltip span {
+    color: #bdcbd5;
+  }
+
+  .fs-iv-point-tooltip strong {
+    text-align: right;
+    color: #ffffff;
+    white-space: nowrap;
+  }
+
+  .fs-iv-point-tooltip.is-maximised {
+    min-width: 179px;
+    padding: 13px 14px;
+    border-width: 2px;
+    border-radius: 13px;
+    gap: 5px 10px;
+    box-shadow: 0 11px 35px rgba(15, 22, 28, 0.3);
+    font-size: 21px;
+    transform: translate(-50%, calc(-100% - 19px));
+  }
+
+  .fs-iv-point-tooltip.is-maximised::after {
+    bottom: -11px;
+    width: 19px;
+    height: 19px;
+    border-right-width: 2px;
+    border-bottom-width: 2px;
+  }
+
+  .fs-iv-point-tooltip.is-maximised.is-below {
+    transform: translate(-50%, 19px);
+  }
+
+  .fs-iv-point-tooltip.is-maximised.is-below::after {
+    top: -11px;
+    bottom: auto;
+    border-top-width: 2px;
+    border-left-width: 2px;
+  }
+
   .fs-circuit-modal {
     width: min(92vw, 620px);
     max-height: min(88vh, 720px);
@@ -4126,6 +4815,43 @@ const layoutCss = `
 
   .fs-motion-mode-modal-body section p {
     margin: 0;
+  }
+
+  .fs-keyboard-shortcuts dl {
+    display: grid;
+    gap: 7px;
+    margin: 0;
+  }
+
+  .fs-keyboard-shortcuts dl > div {
+    display: grid;
+    grid-template-columns: 36px 1fr;
+    align-items: center;
+    gap: 9px;
+  }
+
+  .fs-keyboard-shortcuts dt,
+  .fs-keyboard-shortcuts dd {
+    margin: 0;
+  }
+
+  .fs-keyboard-shortcuts kbd {
+    display: inline-grid;
+    min-width: 30px;
+    min-height: 27px;
+    place-items: center;
+    padding: 1px 6px;
+    border: 1px solid #b5c5d0;
+    border-bottom-width: 2px;
+    border-radius: 6px;
+    background: #f8fbfd;
+    color: #193f5b;
+    font: 700 14px/1 system-ui, sans-serif;
+    box-shadow: 0 1px 1px rgba(22, 57, 82, 0.08);
+  }
+
+  .fs-keyboard-shortcuts dd {
+    color: #36576e;
   }
 
   .fs-motion-mode-note {
@@ -4233,6 +4959,8 @@ const layoutCss = `
   }
 
   .fs-voltage-step-button {
+    position: relative;
+    z-index: 2;
     width: 30px;
     height: 30px;
     padding: 0;
@@ -4244,6 +4972,7 @@ const layoutCss = `
     font-weight: 800;
     line-height: 1;
     cursor: pointer;
+    will-change: transform, box-shadow;
   }
 
   .fs-voltage-step-button:hover:not(:disabled) {
@@ -4264,12 +4993,6 @@ const layoutCss = `
     position: relative;
     margin-top: 11px;
     padding-bottom: 22px;
-  }
-
-  .fs-slider {
-    display: block;
-    width: 100%;
-    margin: 0;
   }
 
   .fs-slider-zero-tick {
@@ -4333,16 +5056,16 @@ const layoutCss = `
   .fs-stage-controls {
     position: absolute;
     z-index: 4;
-    left: 1.875%;
+    left: 1.5%;
     top: ${(IV_PANEL_Y / HEIGHT) * 100}%;
-    width: calc(26.25% + 10px);
-    height: 82px;
+    width: calc(23.625% + 16px);
+    height: 88px;
     box-sizing: border-box;
-    padding: 6px 8px;
+    padding: 7px 9px;
     display: grid;
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto auto;
-    gap: 5px;
+    gap: 6px;
     align-content: center;
     border: 1px solid rgba(203, 213, 223, 0.92);
     border-radius: 10px;
@@ -4353,55 +5076,58 @@ const layoutCss = `
 
   .fs-stage-controls .fs-voltage-control {
     display: grid;
-    grid-template-columns: 145px 120px;
+    grid-template-columns: 86px minmax(0, 1fr);
     align-items: center;
-    gap: 8px;
+    gap: 9px;
     transform: none;
   }
 
   .fs-stage-controls .fs-voltage-heading {
-    width: 145px;
-    justify-content: flex-start;
-    gap: 3px;
-    font-size: clamp(8px, 0.65vw, 10px);
+    width: auto;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+    gap: 2px;
+    color: #435463;
+    font-size: clamp(8px, 0.66vw, 10px);
+    line-height: 1.05;
     white-space: nowrap;
   }
 
   .fs-stage-controls .fs-voltage-value {
-    width: 48px;
-    padding: 1px 4px;
+    width: 56px;
+    padding: 2px 5px;
     border: 1px solid #9fc5ed;
     border-radius: 4px;
     background: #eaf4ff;
     color: #174f7a;
-    font-size: clamp(10px, 0.78vw, 12px);
+    font-size: clamp(11px, 0.82vw, 13px);
     font-variant-numeric: tabular-nums;
     text-align: center;
   }
 
   .fs-stage-controls .fs-slider-wrap {
-    width: 64px;
-    min-width: 64px;
-    max-width: 64px;
+    width: 100%;
+    min-width: 0;
+    max-width: none;
     margin-top: 0;
     padding-bottom: 18px;
   }
 
   .fs-stage-controls .fs-voltage-stepper {
-    grid-template-columns: 20px 64px 20px;
-    width: 120px;
+    grid-template-columns: 22px minmax(0, 1fr) 22px;
+    width: 100%;
     margin-top: 0;
-    gap: 8px;
+    gap: 7px;
   }
 
   .fs-stage-controls .fs-voltage-stepper .fs-slider-wrap {
-    width: 64px;
-    min-width: 64px;
-    max-width: 64px;
+    width: 100%;
+    min-width: 0;
+    max-width: none;
   }
 
-  .fs-stage-controls .fs-slider-wrap::before {
-    content: "";
+  .fs-stage-controls .fs-slider-rail {
     position: absolute;
     z-index: 0;
     left: 0;
@@ -4419,6 +5145,7 @@ const layoutCss = `
       #d4dde5 var(--slider-active-end),
       #d4dde5 100%
     );
+    pointer-events: none;
   }
 
   .fs-stage-controls .fs-slider-thumb {
@@ -4436,62 +5163,30 @@ const layoutCss = `
     pointer-events: none;
   }
 
-  .fs-stage-controls .fs-slider {
-    -webkit-appearance: none;
-    appearance: none;
-    width: 100%;
-    min-width: 0;
-    max-width: none;
+  .fs-stage-controls .fs-slider-hit-area {
+    position: absolute;
+    z-index: 2;
+    left: -${SLIDER_POINTER_GUTTER}px;
+    right: -${SLIDER_POINTER_GUTTER}px;
+    top: -7px;
     height: 32px;
-    margin: -6px 0 -8px;
+    border: 0;
     border-radius: 999px;
     background: transparent;
     cursor: pointer;
     touch-action: none;
   }
 
-  .fs-stage-controls .fs-slider::-webkit-slider-runnable-track {
-    height: 6px;
-    border: 0;
-    border-radius: 999px;
-    background: transparent;
-  }
-
-  .fs-stage-controls .fs-slider::-webkit-slider-thumb {
-    -webkit-appearance: none;
-    appearance: none;
-    width: 28px;
-    height: 28px;
-    margin-top: -11px;
-    border: 0;
-    background: transparent;
-    opacity: 0;
-  }
-
-  .fs-stage-controls .fs-slider::-moz-range-track {
-    height: 6px;
-    border: 0;
-    border-radius: 999px;
-    background: transparent;
-  }
-
-  .fs-stage-controls .fs-slider::-moz-range-thumb {
-    width: 28px;
-    height: 28px;
-    border: 0;
-    background: transparent;
-    opacity: 0;
-  }
-
-  .fs-stage-controls .fs-slider:focus-visible {
+  .fs-stage-controls .fs-slider-hit-area:focus-visible {
     outline: 3px solid rgba(77, 143, 200, 0.24);
-    outline-offset: 2px;
+    outline-offset: -2px;
   }
 
   .fs-stage-controls .fs-voltage-step-button {
-    width: 20px;
-    height: 20px;
-    font-size: 13px;
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
+    font-size: 14px;
     transform: none;
   }
 
@@ -4515,20 +5210,28 @@ const layoutCss = `
 
   .fs-stage-controls .fs-actions {
     display: grid;
-    grid-template-columns: 85px 48px 42px minmax(76px, 1fr);
+    grid-template-columns: minmax(100px, 1.55fr) minmax(50px, 0.75fr) minmax(56px, 0.85fr);
     align-items: center;
     justify-content: stretch;
     gap: 4px;
     min-width: 0;
+    padding-top: 5px;
+    border-top: 1px solid rgba(203, 213, 223, 0.72);
   }
 
   .fs-stage-controls .fs-actions button {
     width: 100%;
-    min-height: 24px !important;
+    min-height: 25px !important;
     white-space: nowrap;
     padding: 3px 5px !important;
     font-size: clamp(8px, 0.61vw, 9.5px) !important;
     border-radius: 6px !important;
+  }
+
+  .fs-stage-controls .fs-clear-data-button {
+    border-color: #c9d1d8 !important;
+    background: #f8fafb !important;
+    color: #667581 !important;
   }
 
   .fs-stage-controls .fs-control-side {
@@ -4869,6 +5572,46 @@ const layoutCss = `
   .fs-trend-overlay-toggle:focus-visible {
     outline: 2px solid #8fc2f7;
     outline-offset: 2px;
+  }
+
+  .fs-maximise-iv-button {
+    position: absolute;
+    z-index: 4;
+    display: grid;
+    place-items: center;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    border: 1px solid #c4ced6;
+    border-radius: 5px;
+    background: #ffffff;
+    color: #4d5b66;
+    cursor: pointer;
+    transform: translateX(-100%);
+  }
+
+  .fs-maximise-iv-button:hover {
+    border-color: #8fa0ad;
+    background: #eef3f6;
+    color: #253b4b;
+  }
+
+  .fs-maximise-iv-button:focus-visible {
+    outline: 2px solid #8fc2f7;
+    outline-offset: 2px;
+  }
+
+  .fs-maximise-iv-button svg {
+    width: 12px;
+    height: 12px;
+  }
+
+  .fs-maximise-iv-button path {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.6;
+    stroke-linecap: round;
+    stroke-linejoin: round;
   }
 
 
