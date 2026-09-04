@@ -1549,21 +1549,20 @@ function drawAmmeterHistory(
 }
 
 function filamentTrendCurrent(voltage) {
-  const straightLimit = 5.5;
+  const straightLimit = 4;
   const lowVoltageGradient = 0.495;
-  const currentAtMaxVoltage = 3.9;
+  const currentAtMaxVoltage = 3.8;
   const magnitude = Math.abs(voltage);
 
   if (magnitude <= straightLimit) {
     return voltage * lowVoltageGradient;
   }
 
-  // Match the straight section's gradient at 5.5 V, then reduce the gradient
+  // Match the straight section's gradient at 4 V, then reduce the gradient
   // smoothly to model the rising resistance of a heating filament.
-  // The slightly steeper initial gradient is paired with a tighter bend. The
-  // normalised exponential keeps the guide at exactly 3.9 A at 12 V while
+  // The normalised exponential keeps the guide at exactly 3.8 A at 12 V while
   // retaining a smooth join to the straight section.
-  const bendScale = 2.58908;
+  const bendScale = 4.3834;
   const extraVoltage = magnitude - straightLimit;
   const maximumExtraVoltage = MAX_VOLTAGE - straightLimit;
   const bendProgress =
@@ -1595,6 +1594,8 @@ function sampleCappedNormalCurrentVariation() {
 
 function simplifiedBaseCurrentTarget(voltage) {
   if (Math.abs(voltage) < 0.001) return 0;
+  // Use the plotted trendline directly so every simplified-mode voltage target
+  // follows the same 4 V bend and remains symmetrical about the origin.
   return filamentTrendCurrent(voltage);
 }
 
@@ -3150,7 +3151,12 @@ export default function App() {
     : "none";
 
   return (
-    <div className="fs-page">
+    <div
+      className="fs-page"
+      onClickCapture={(event) => {
+        event.target.closest?.("button")?.blur();
+      }}
+    >
       <style>{layoutCss}</style>
 
       <main className="fs-shell">
@@ -3163,7 +3169,10 @@ export default function App() {
                 <input
                   type="checkbox"
                   checked={simplifiedMode}
-                  onChange={toggleSimplifiedMode}
+                  onChange={(event) => {
+                    toggleSimplifiedMode();
+                    event.currentTarget.blur();
+                  }}
                   aria-label="Simplified electron motion"
                 />
                 <span className="fs-simplified-mode-track" aria-hidden="true">
@@ -3889,12 +3898,13 @@ export default function App() {
 
               <h3>Summary</h3>
               <ul>
-                <li>Potential difference (V) is on the horizontal axis.</li>
-                <li>Current (A) is on the vertical axis.</li>
-                <li>The curve passes through the origin and is roughly symmetrical.</li>
-                <li>A hotter filament has a greater resistance.</li>
-                <li>Greater resistance makes the I-V curve less steep.</li>
-                <li>Let each current reading settle before capturing it.</li>
+                <li>A filament lamp is non-ohmic: current is not directly proportional to potential difference.</li>
+                <li>As current increases, the filament gets hotter.</li>
+                <li>The metal ions gain energy and vibrate more.</li>
+                <li>Electrons collide with the vibrating ions more often.</li>
+                <li>This makes it harder for charge to flow, so the filament's resistance increases.</li>
+                <li>Current therefore increases at a decreasing rate, so the I-V curve becomes less steep.</li>
+                <li>Reversing the potential difference reverses the current, giving a symmetrical curve through the origin.</li>
               </ul>
             </div>
           </div>
